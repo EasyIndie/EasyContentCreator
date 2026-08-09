@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from apps.api.main import app, get_database
 from apps.common.database import Database
 from packages.domain import ContentProject, ProjectRepository, ProjectStatus
-from packages.pipeline import JobStore
+from packages.pipeline import FactCardGenerationSpec, GenerationRequestRepository, JobStore
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
@@ -35,12 +35,19 @@ def set_job(
     status: str,
     attempt: int,
     last_error: str | None = None,
+    updated_at: datetime | None = None,
 ) -> None:
     with database.connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             """UPDATE jobs SET status=%s, attempt=%s, last_error=%s,
             lease_owner=NULL, lease_expires_at=NULL, updated_at=%s WHERE id=%s""",
-            (status, attempt, last_error, NOW + timedelta(seconds=attempt), job_id),
+            (
+                status,
+                attempt,
+                last_error,
+                updated_at or NOW + timedelta(seconds=attempt),
+                job_id,
+            ),
         )
         assert cursor.rowcount == 1
 
@@ -51,10 +58,14 @@ def test_job_views_are_safe_sorted_and_recoverable_only_for_failed_generation(
     project = create_project(database)
     other = create_project(database, "Other")
     store = JobStore(database)
-    older = store.enqueue("generate_fact_card", project.id, {"secret": "do-not-leak"}, 3, NOW)
-    failed = store.enqueue(
-        "generate_fact_card", project.id, {"source_text": "private evidence"}, 3, NOW
+    reservation = GenerationRequestRepository(database).reserve_and_enqueue(
+        FactCardGenerationSpec(project.id, (uuid4(),), "fact-card-v1", 100),
+        "generation",
+        NOW,
+        3,
     )
+    failed = reservation.job_id
+    older = store.enqueue("other", project.id, {"secret": "do-not-leak"}, 3, NOW)
     other_job = store.enqueue("other", other.id, {"token": "hidden"}, 1, NOW)
     set_job(database, older, status="succeeded", attempt=1)
     set_job(
@@ -75,10 +86,12 @@ def test_job_views_are_safe_sorted_and_recoverable_only_for_failed_generation(
 
     assert response.status_code == 200
     items = response.json()["items"]
-    assert [item["id"] for item in items] == [str(failed), str(older)]
-    assert items[0]["error_class"] == "UnknownError"
-    assert items[0]["recoverable"] is True
-    assert items[1]["recoverable"] is False
+    by_id = {item["id"]: item for item in items}
+    assert set(by_id) == {str(failed), str(older)}
+    assert by_id[str(failed)]["error_class"] == "UnknownError"
+    assert by_id[str(failed)]["recoverable"] is True
+    assert by_id[str(older)]["recoverable"] is False
+    assert client.get(f"/projects/{project.id}/jobs").json()["items"] == items
     serialized = response.text
     for forbidden in (
         "payload",
@@ -143,7 +156,7 @@ def test_job_routes_use_frozen_not_found_and_validation_shapes(
     assert missing_project.status_code == 404
     assert missing_project.json()["detail"]["code"] == "not_found"
     assert missing_job.status_code == 404
-    assert missing_job.json()["detail"]["code"] == "not_found"
+    assert missing_job.json() == {"detail": {"code": "not_found", "message": "job not found"}}
     assert invalid_project.status_code == invalid_job.status_code == 422
 
 
@@ -165,3 +178,64 @@ def test_openapi_job_models_do_not_expose_sensitive_fields(client: TestClient) -
         "recoverable",
     }
     assert {"payload", "lease_owner", "lease_expires_at"}.isdisjoint(properties)
+
+
+def test_only_latest_generation_reservation_is_recoverable(
+    database: Database, client: TestClient
+) -> None:
+    project = create_project(database)
+    repository = GenerationRequestRepository(database)
+    first = repository.reserve_and_enqueue(
+        FactCardGenerationSpec(project.id, (uuid4(),), "v1", 10), "first", NOW, 2
+    )
+    set_job(database, first.job_id, status="failed", attempt=2, last_error="PermanentError")
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """UPDATE projects SET status='failed', failed_stage='generation',
+            revision=revision+1, updated_at=%s WHERE id=%s""",
+            (NOW + timedelta(seconds=1), project.id),
+        )
+    second = repository.reserve_and_enqueue(
+        FactCardGenerationSpec(project.id, (uuid4(),), "v1", 10),
+        "second",
+        NOW + timedelta(seconds=2),
+        2,
+    )
+    set_job(
+        database,
+        second.job_id,
+        status="succeeded",
+        attempt=1,
+        updated_at=NOW + timedelta(seconds=3),
+    )
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """UPDATE projects SET status='failed', failed_stage='generation',
+            revision=revision+1, updated_at=%s WHERE id=%s""",
+            (NOW + timedelta(seconds=3), project.id),
+        )
+
+    items = client.get(f"/projects/{project.id}/jobs").json()["items"]
+    by_id = {item["id"]: item for item in items}
+
+    assert by_id[str(first.job_id)]["recoverable"] is False
+    assert by_id[str(second.job_id)]["recoverable"] is True
+
+
+def test_expired_lease_reports_persisted_state_then_cleanup_state(
+    database: Database, client: TestClient
+) -> None:
+    project = create_project(database)
+    store = JobStore(database)
+    job_id = store.enqueue("expiring", project.id, {}, 1, NOW)
+    claimed = store.claim("worker", NOW, timedelta(seconds=5))
+    assert claimed is not None and claimed.id == job_id
+
+    before_cleanup = client.get(f"/jobs/{job_id}").json()
+    assert before_cleanup["status"] == "running"
+    assert before_cleanup["error_class"] is None
+
+    assert store.claim("replacement", NOW + timedelta(seconds=5), timedelta(seconds=5)) is None
+    after_cleanup = client.get(f"/jobs/{job_id}").json()
+    assert after_cleanup["status"] == "failed"
+    assert after_cleanup["error_class"] == "LeaseExpired"

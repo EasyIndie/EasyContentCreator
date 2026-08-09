@@ -26,6 +26,7 @@ from packages.pipeline import (
     FactCardGenerationSpec,
     GenerationRequestConflict,
     GenerationRequestRepository,
+    JobNotFoundError,
     JobStatus,
     JobStore,
     JobView,
@@ -160,7 +161,9 @@ def _project_response(project: ContentProject) -> ProjectResponse:
     )
 
 
-def _job_response(job: JobView, project: ContentProject) -> JobResponse:
+def _job_response(
+    job: JobView, project: ContentProject, latest_generation_job_id: UUID | None
+) -> JobResponse:
     return JobResponse(
         id=job.id,
         project_id=job.project_id,
@@ -175,7 +178,7 @@ def _job_response(job: JobView, project: ContentProject) -> JobResponse:
         recoverable=(
             project.status is ProjectStatus.FAILED
             and project.failed_stage is FailedStage.GENERATION
-            and job.status is JobStatus.FAILED
+            and job.id == latest_generation_job_id
         ),
     )
 
@@ -248,6 +251,11 @@ def generation_conflict_handler(
     )
 
 
+@app.exception_handler(JobNotFoundError)
+def job_not_found_handler(_request: Request, _error_value: JobNotFoundError) -> JSONResponse:
+    return _error(status.HTTP_404_NOT_FOUND, "not_found", "job not found")
+
+
 @app.get("/version", response_model=VersionResponse)
 def version(settings: Annotated[Settings, Depends(get_settings)]) -> VersionResponse:
     return VersionResponse(version=settings.version, commit=settings.commit)
@@ -313,8 +321,12 @@ def list_project_jobs(
     jobs: Annotated[JobStore, Depends(get_job_store)],
 ) -> JobListResponse:
     project = projects.get(project_id)
+    latest_generation_job_id = jobs.latest_generation_job_id(project_id)
     return JobListResponse(
-        items=[_job_response(job, project) for job in jobs.list_views(project_id)]
+        items=[
+            _job_response(job, project, latest_generation_job_id)
+            for job in jobs.list_views(project_id)
+        ]
     )
 
 
@@ -325,7 +337,11 @@ def get_job(
     jobs: Annotated[JobStore, Depends(get_job_store)],
 ) -> JobResponse:
     job = jobs.get_view(job_id)
-    return _job_response(job, projects.get(job.project_id))
+    return _job_response(
+        job,
+        projects.get(job.project_id),
+        jobs.latest_generation_job_id(job.project_id),
+    )
 
 
 @app.post(

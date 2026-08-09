@@ -28,6 +28,10 @@ class LostLeaseError(Exception):
     """The worker no longer owns a live lease for the requested Job."""
 
 
+class JobNotFoundError(EntityNotFoundError):
+    """A requested Job does not exist."""
+
+
 _SAFE_ERROR_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
@@ -241,7 +245,7 @@ class JobStore:
             )
             row = cursor.fetchone()
         if row is None:
-            raise EntityNotFoundError(f"job does not exist: {job_id}")
+            raise JobNotFoundError(f"job does not exist: {job_id}")
         return _job_view_from_row(row)
 
     def list_views(self, project_id: UUID) -> tuple[JobView, ...]:
@@ -258,6 +262,16 @@ class JobStore:
             )
             rows = cursor.fetchall()
         return tuple(_job_view_from_row(row) for row in rows)
+
+    def latest_generation_job_id(self, project_id: UUID) -> UUID | None:
+        with self.database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT job_id FROM generation_requests WHERE project_id = %s
+                ORDER BY artifact_version DESC, created_at DESC, job_id DESC LIMIT 1""",
+                (project_id,),
+            )
+            row = cursor.fetchone()
+        return row[0] if row is not None else None
 
     def fail(
         self,
