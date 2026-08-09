@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Header, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from apps.common.config import Settings, get_settings
 from apps.common.database import Database
@@ -20,6 +20,12 @@ from packages.domain import (
     Review,
     ReviewDecision,
     transition_project,
+)
+from packages.pipeline import (
+    FactCardGenerationSpec,
+    GenerationRequestConflict,
+    GenerationRequestRepository,
+    JobStatus,
 )
 
 app = FastAPI(title="EasyContentCreator API", version="0.1.0")
@@ -88,6 +94,27 @@ class ReviewResponse(BaseModel):
     created_at: datetime
 
 
+class GenerationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_ids: list[UUID] = Field(min_length=1)
+    template_version: NonEmptyText
+    budget_units: int = Field(gt=0)
+
+    @field_validator("source_ids")
+    @classmethod
+    def source_ids_must_be_unique(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("source_ids must not contain duplicates")
+        return value
+
+
+class GenerationResponse(BaseModel):
+    job_id: UUID
+    project_id: UUID
+    status: JobStatus
+
+
 def _artifact_response(ref: ArtifactRef) -> ArtifactRefResponse:
     return ArtifactRefResponse(
         artifact_id=ref.artifact_id,
@@ -126,6 +153,12 @@ def get_project_repository(
     return ProjectRepository(database)
 
 
+def get_generation_repository(
+    database: Annotated[Database, Depends(get_database)],
+) -> GenerationRequestRepository:
+    return GenerationRequestRepository(database)
+
+
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code, content={"detail": {"code": code, "message": message}}
@@ -156,6 +189,17 @@ def invalid_transition_handler(
         status.HTTP_409_CONFLICT,
         "invalid_transition",
         "review decision is not allowed for current project status",
+    )
+
+
+@app.exception_handler(GenerationRequestConflict)
+def generation_conflict_handler(
+    _request: Request, _error_value: GenerationRequestConflict
+) -> JSONResponse:
+    return _error(
+        status.HTTP_409_CONFLICT,
+        "idempotency_conflict",
+        "Idempotency-Key was already used with a different request",
     )
 
 
@@ -215,6 +259,44 @@ def get_project(
     repository: Annotated[ProjectRepository, Depends(get_project_repository)],
 ) -> ProjectResponse:
     return _project_response(repository.get(project_id))
+
+
+@app.post(
+    "/projects/{project_id}/generate",
+    response_model=GenerationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def generate_project(
+    project_id: UUID,
+    request: GenerationCreate,
+    repository: Annotated[GenerationRequestRepository, Depends(get_generation_repository)],
+    now: Annotated[datetime, Depends(utc_now)],
+    idempotency_key: Annotated[
+        str,
+        Header(
+            alias="Idempotency-Key",
+            min_length=1,
+            max_length=200,
+            pattern=r".*\S.*",
+        ),
+    ],
+) -> GenerationResponse:
+    reservation = repository.reserve_and_enqueue(
+        FactCardGenerationSpec(
+            project_id=project_id,
+            source_ids=tuple(request.source_ids),
+            template_version=request.template_version,
+            budget_units=request.budget_units,
+        ),
+        idempotency_key,
+        now,
+        max_attempts=3,
+    )
+    return GenerationResponse(
+        job_id=reservation.job_id,
+        project_id=project_id,
+        status=JobStatus.QUEUED,
+    )
 
 
 @app.post(

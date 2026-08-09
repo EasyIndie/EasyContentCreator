@@ -7,8 +7,10 @@ from uuid import uuid4
 
 from apps.common.config import get_settings
 from apps.common.database import Database
+from apps.worker.generation import FactCardGenerationHandler
 from packages.domain.errors import AdapterContractError, PermanentError, RetryableError
 from packages.pipeline import Job, JobBackend, JobHandler, JobStore, LostLeaseError
+from packages.providers import FakeProvider
 
 LOGGER = logging.getLogger(__name__)
 
@@ -128,7 +130,26 @@ class PollingWorker:
 def main() -> None:
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
-    worker = PollingWorker(Database(settings.database_url), settings.worker_poll_interval_seconds)
+    database = Database(settings.database_url)
+
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
+    handler = FactCardGenerationHandler(
+        database,
+        FakeProvider(
+            created_at=clock(),
+            created_by="easycontent-worker",
+            storage_root=settings.artifact_root,
+        ),
+        clock,
+    )
+    worker = PollingWorker(
+        database,
+        settings.worker_poll_interval_seconds,
+        handlers={"generate_fact_card": handler},
+        clock=clock,
+    )
     signal.signal(signal.SIGTERM, lambda _signum, _frame: worker.stop())
     signal.signal(signal.SIGINT, lambda _signum, _frame: worker.stop())
     worker.run()

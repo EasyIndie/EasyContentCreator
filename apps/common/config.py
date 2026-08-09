@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
         repr=False,
     )
     worker_poll_interval_seconds: float = Field(default=5.0, gt=0)
+    artifact_root: Path = Path("artifacts")
 
 
 @lru_cache
