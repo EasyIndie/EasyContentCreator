@@ -162,7 +162,7 @@ def _project_response(project: ContentProject) -> ProjectResponse:
 
 
 def _job_response(
-    job: JobView, project: ContentProject, latest_generation_job_id: UUID | None
+    job: JobView, project: ContentProject, recoverable_generation_job_id: UUID | None
 ) -> JobResponse:
     return JobResponse(
         id=job.id,
@@ -178,7 +178,7 @@ def _job_response(
         recoverable=(
             project.status is ProjectStatus.FAILED
             and project.failed_stage is FailedStage.GENERATION
-            and job.id == latest_generation_job_id
+            and job.id == recoverable_generation_job_id
         ),
     )
 
@@ -321,10 +321,10 @@ def list_project_jobs(
     jobs: Annotated[JobStore, Depends(get_job_store)],
 ) -> JobListResponse:
     project = projects.get(project_id)
-    latest_generation_job_id = jobs.latest_generation_job_id(project_id)
+    recoverable_generation_job_id = jobs.recoverable_generation_job_id(project_id, project.revision)
     return JobListResponse(
         items=[
-            _job_response(job, project, latest_generation_job_id)
+            _job_response(job, project, recoverable_generation_job_id)
             for job in jobs.list_views(project_id)
         ]
     )
@@ -337,10 +337,11 @@ def get_job(
     jobs: Annotated[JobStore, Depends(get_job_store)],
 ) -> JobResponse:
     job = jobs.get_view(job_id)
+    project = projects.get(job.project_id)
     return _job_response(
         job,
-        projects.get(job.project_id),
-        jobs.latest_generation_job_id(job.project_id),
+        project,
+        jobs.recoverable_generation_job_id(job.project_id, project.revision),
     )
 
 

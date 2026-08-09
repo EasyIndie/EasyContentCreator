@@ -263,12 +263,32 @@ class JobStore:
             rows = cursor.fetchall()
         return tuple(_job_view_from_row(row) for row in rows)
 
-    def latest_generation_job_id(self, project_id: UUID) -> UUID | None:
+    def recoverable_generation_job_id(self, project_id: UUID, project_revision: int) -> UUID | None:
         with self.database.connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                """SELECT job_id FROM generation_requests WHERE project_id = %s
-                ORDER BY artifact_version DESC, created_at DESC, job_id DESC LIMIT 1""",
-                (project_id,),
+                """WITH latest AS (
+                  SELECT request.job_id, request.artifact_version, request.created_at
+                  FROM generation_requests AS request
+                  WHERE request.project_id = %s
+                  ORDER BY request.artifact_version DESC, request.created_at DESC,
+                           request.job_id DESC
+                  LIMIT 1
+                )
+                SELECT latest.job_id
+                FROM latest JOIN jobs AS job ON job.id = latest.job_id
+                WHERE (
+                    job.status = 'failed'
+                    OR (
+                      job.status = 'succeeded'
+                      AND EXISTS (
+                        SELECT 1 FROM reviews
+                        WHERE project_id = %s AND decision = 'reject'
+                          AND project_revision = %s
+                      )
+                    )
+                  )
+                """,
+                (project_id, project_id, project_revision),
             )
             row = cursor.fetchone()
         return row[0] if row is not None else None

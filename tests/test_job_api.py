@@ -219,7 +219,21 @@ def test_only_latest_generation_reservation_is_recoverable(
     by_id = {item["id"]: item for item in items}
 
     assert by_id[str(first.job_id)]["recoverable"] is False
-    assert by_id[str(second.job_id)]["recoverable"] is True
+    assert by_id[str(second.job_id)]["recoverable"] is False
+
+    current = ProjectRepository(database).get(project.id)
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """INSERT INTO reviews
+            (id, project_id, decision, note, project_revision, created_at)
+            VALUES (%s, %s, 'reject', 'Evidence needs revision', %s, %s)""",
+            (uuid4(), project.id, current.revision, NOW + timedelta(seconds=3)),
+        )
+
+    refreshed = client.get(f"/projects/{project.id}/jobs").json()["items"]
+    refreshed_by_id = {item["id"]: item for item in refreshed}
+    assert refreshed_by_id[str(first.job_id)]["recoverable"] is False
+    assert refreshed_by_id[str(second.job_id)]["recoverable"] is True
 
 
 def test_expired_lease_reports_persisted_state_then_cleanup_state(
