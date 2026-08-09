@@ -31,9 +31,6 @@ services:
     restart: unless-stopped
   worker:
     image: ${ECC_IMAGE:-easy-content-creator:dev}
-    build:
-      context: .
-      dockerfile: apps/worker/Dockerfile
     environment:
       ECC_ARTIFACT_ROOT: /data/artifacts
       ECC_DATABASE_URL: postgresql://${POSTGRES_USER:-ecc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecc}

@@ -27,6 +27,10 @@ def test_compose_injects_prefixed_database_and_persistent_artifact_root() -> Non
     assert services["worker"]["environment"]["ECC_DATABASE_URL"] == expected_database_url
     assert "DATABASE_URL" not in services["worker"]["environment"]
     assert services["worker"]["environment"]["ECC_ARTIFACT_ROOT"] == "/data/artifacts"
+    assert "build" in services["api"]
+    assert "build" not in services["worker"]
+    assert services["worker"]["image"] == services["api"]["image"]
+    assert services["worker"]["command"] == ["python", "-m", "apps.worker.main"]
     assert {
         "type": "volume",
         "source": "artifacts",

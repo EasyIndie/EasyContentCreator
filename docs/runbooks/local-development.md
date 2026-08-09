@@ -16,8 +16,12 @@
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
+python -c "from apps.common.config import get_settings; from apps.common.database import Database; from migrations import run_migrations; print(run_migrations(Database(get_settings().database_url)))"
 uvicorn apps.api.main:app --reload
 ```
+
+API/Worker 当前不会在进程入口自动执行迁移；首次启动或拉取新增 migration 后，必须先运行上述
+仓库既有 `run_migrations` 入口。重复执行是幂等的。
 
 另开终端启动 Worker：
 
