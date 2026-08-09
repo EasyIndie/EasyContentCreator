@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from packages.pipeline.evidence import validate_artifact_evidence
 
 FACT_CARD_JOB_KIND = "generate_fact_card"
 FACT_CARD_ID_NAME = "artifact:fact_card"
+_ERROR_CLASS_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
 def _thaw_json(value: Any) -> Any:
@@ -309,15 +311,24 @@ class GenerationTerminalRepository:
         artifact: Artifact,
         sources_by_id: Mapping[UUID, Source],
     ) -> None:
-        report = validate_artifact_evidence(artifact, sources_by_id)
-        if not report.valid:
-            raise EvidenceSourceError("artifact evidence validation failed")
         with (
             self._database.connect() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             reservation, project = self._lock_context(cursor, job_id, worker_id, _utc(now))
             self._validate_artifact(reservation, artifact)
+            reserved_source_ids = set(reservation.spec.source_ids)
+            if set(sources_by_id) != reserved_source_ids:
+                raise EvidenceSourceError("sources do not exactly match generation reservation")
+            reserved_sources = tuple(
+                sources_by_id[source_id] for source_id in reservation.spec.source_ids
+            )
+            expected_citations = citations_for_sources(reserved_sources)
+            if artifact.citations != expected_citations:
+                raise EvidenceSourceError("artifact citations do not match reserved sources")
+            report = validate_artifact_evidence(artifact, sources_by_id)
+            if not report.valid:
+                raise EvidenceSourceError("artifact evidence validation failed")
             self._insert_artifact(cursor, artifact)
             cursor.execute(
                 """
@@ -341,8 +352,8 @@ class GenerationTerminalRepository:
         error_class: str,
         artifact: Artifact | None = None,
     ) -> None:
-        if not error_class.strip():
-            raise ValueError("error_class is required")
+        if _ERROR_CLASS_PATTERN.fullmatch(error_class) is None:
+            raise ValueError("error_class must be a safe exception class name")
         with (
             self._database.connect() as connection,
             connection.cursor(row_factory=dict_row) as cursor,

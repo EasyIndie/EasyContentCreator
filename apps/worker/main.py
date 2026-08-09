@@ -80,7 +80,7 @@ class PollingWorker:
             self._fail(job, error)
         except Exception as error:
             LOGGER.warning(
-                "job handler exited without terminal commit",
+                "job handler raised",
                 extra={**self._log_context(job), "error_class": type(error).__name__},
             )
         else:
