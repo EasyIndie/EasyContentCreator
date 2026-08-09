@@ -26,8 +26,10 @@ from packages.domain.repositories import (
     ImmutableConflictError,
     ProjectRepository,
     RepositoryError,
+    ReviewRepository,
     SourceRepository,
 )
+from packages.domain.reviews import Review, ReviewDecision
 from packages.domain.state import transition_project
 
 __all__ = [
@@ -47,6 +49,9 @@ __all__ = [
     "ProjectStatus",
     "ProjectRepository",
     "RepositoryError",
+    "Review",
+    "ReviewDecision",
+    "ReviewRepository",
     "RetryableError",
     "Source",
     "SourceCitation",
