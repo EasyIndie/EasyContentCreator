@@ -21,7 +21,12 @@ from packages.domain import (
     SourceKind,
     SourceRepository,
 )
-from packages.pipeline import GenerationRequestRepository, JobStatus, JobStore
+from packages.pipeline import (
+    FactCardGenerationSpec,
+    GenerationRequestRepository,
+    JobStatus,
+    JobStore,
+)
 from packages.providers import FakeProvider, GenerationRequest
 
 NOW = datetime.now(UTC) + timedelta(minutes=1)
@@ -44,22 +49,29 @@ def add_project(database: Database, title: str = "M1 vertical slice") -> Content
     return project
 
 
-def add_source(database: Database, *, excerpts: bool = True) -> Source:
+def add_source(
+    database: Database, *, excerpts: bool = True, excerpt_count: int = 1, sha256: str = "a" * 64
+) -> Source:
     source = Source(
         uuid4(),
         SourceKind.OFFICIAL_DOCUMENTATION,
         "Official source",
         "https://example.test/official",
         NOW,
-        "a" * 64,
+        sha256,
         "Trusted summary",
-        (SourceExcerpt(uuid4(), "Verified evidence", "section-1"),) if excerpts else (),
+        tuple(
+            SourceExcerpt(uuid4(), f"Verified evidence {index}", f"section-{index}")
+            for index in range(excerpt_count)
+        )
+        if excerpts
+        else (),
     )
     SourceRepository(database).add(source)
     return source
 
 
-def request_body(*source_ids: UUID, budget_units: int = 1000) -> dict[str, object]:
+def request_body(*source_ids: UUID, budget_units: object = 1000) -> dict[str, object]:
     return {
         "source_ids": [str(item) for item in source_ids],
         "template_version": "fact-card-v1",
@@ -144,9 +156,45 @@ def test_generate_api_idempotency_and_validation(
             {**request_body(source.id), "template_version": " "},
         ),
         ({"Idempotency-Key": "bad-budget"}, request_body(source.id, budget_units=0)),
+        ({"Idempotency-Key": "bool-budget"}, request_body(source.id, budget_units=True)),
+        ({"Idempotency-Key": "string-budget"}, request_body(source.id, budget_units="1000")),
     )
     for headers, body in invalid_requests:
         assert client.post(url, headers=headers, json=body).status_code == 422
+
+    missing = client.post(
+        f"/projects/{uuid4()}/generate",
+        headers={"Idempotency-Key": "missing-project"},
+        json=request_body(source.id),
+    )
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": {"code": "not_found", "message": "project not found"}}
+    invalid_path = client.post(
+        "/projects/not-a-uuid/generate",
+        headers={"Idempotency-Key": "bad-path"},
+        json=request_body(source.id),
+    )
+    assert invalid_path.status_code == 422
+    assert isinstance(invalid_path.json()["detail"], list)
+    illegal_project = add_project(database, "Already active")
+    GenerationRequestRepository(database).reserve_and_enqueue(
+        FactCardGenerationSpec(illegal_project.id, (source.id,), "fact-card-v1", 1000),
+        "active-first",
+        NOW,
+        3,
+    )
+    illegal = client.post(
+        f"/projects/{illegal_project.id}/generate",
+        headers={"Idempotency-Key": "active-second"},
+        json=request_body(source.id),
+    )
+    assert illegal.status_code == 409
+    assert illegal.json() == {
+        "detail": {
+            "code": "invalid_transition",
+            "message": "operation is not allowed for current project status",
+        }
+    }
 
 
 def test_fake_success_reaches_approved_with_reproducible_evidence(
@@ -155,12 +203,15 @@ def test_fake_success_reaches_approved_with_reproducible_evidence(
     tmp_path: Path,
 ) -> None:
     client, clock = api
-    project = add_project(database)
-    source = add_source(database)
+    created = client.post("/projects", json={"title": "M1 API-created project"})
+    assert created.status_code == 201
+    project = ProjectRepository(database).get(UUID(created.json()["id"]))
+    source_a = add_source(database, excerpt_count=2, sha256="a" * 64)
+    source_b = add_source(database, excerpt_count=2, sha256="b" * 64)
     response = client.post(
         f"/projects/{project.id}/generate",
         headers={"Idempotency-Key": "success"},
-        json=request_body(source.id),
+        json=request_body(source_b.id, source_a.id),
     )
     job_id = UUID(response.json()["job_id"])
 
@@ -170,9 +221,17 @@ def test_fake_success_reaches_approved_with_reproducible_evidence(
     assert generated.status is ProjectStatus.REVIEW_REQUIRED
     ref = generated.current_artifacts[ArtifactKind.FACT_CARD]
     artifact = ArtifactRepository(database).get(ref.artifact_id, ref.version)
-    assert artifact.citations[0].source_id == source.id
-    assert artifact.citations[0].excerpt_id == source.excerpts[0].id
-    assert artifact.citations[0].source_sha256 == source.sha256
+    assert len(artifact.citations) == 4
+    expected_citations = {
+        (source.id, excerpt.id, source.sha256)
+        for source in (source_a, source_b)
+        for excerpt in source.excerpts
+    }
+    assert {
+        (item.source_id, item.excerpt_id, item.source_sha256) for item in artifact.citations
+    } == expected_citations
+    assert SourceRepository(database).get(source_a.id) == source_a
+    assert SourceRepository(database).get(source_b.id) == source_b
     assert read_job_status(database, job_id) == JobStatus.SUCCEEDED.value
 
     reservation = GenerationRequestRepository(database).get_by_job_id(job_id)
@@ -191,7 +250,7 @@ def test_fake_success_reaches_approved_with_reproducible_evidence(
             inputs=(),
             template_version=reservation.spec.template_version,
             budget_units=reservation.spec.budget_units,
-            parameters={"source_ids": (str(source.id),)},
+            parameters={"source_ids": tuple(str(item) for item in reservation.spec.source_ids)},
         )
     )
     assert (tmp_path / "first" / artifact.storage_path).read_bytes() == (
@@ -208,6 +267,15 @@ def test_fake_success_reaches_approved_with_reproducible_evidence(
     )
     assert approved.status_code == 201
     assert ProjectRepository(database).get(project.id).status is ProjectStatus.APPROVED
+
+    replay = client.post(
+        f"/projects/{project.id}/generate",
+        headers={"Idempotency-Key": "success"},
+        json=request_body(source_b.id, source_a.id),
+    )
+    assert replay.status_code == 202
+    assert replay.json()["job_id"] == str(job_id)
+    assert replay.json()["status"] == "succeeded"
 
 
 def test_retryable_failure_reuses_job_and_reservation_then_succeeds(
@@ -254,9 +322,12 @@ def test_permanent_evidence_failure_recovers_with_new_version(
         json=request_body(invalid.id),
     )
     first_job = UUID(first.json()["job_id"])
+    first_reservation = GenerationRequestRepository(database).get_by_job_id(first_job)
     worker(database, tmp_path, clock).poll_once()
     assert read_job_status(database, first_job) == JobStatus.FAILED.value
-    assert ProjectRepository(database).get(project.id).status is ProjectStatus.FAILED
+    failed = ProjectRepository(database).get(project.id)
+    assert failed.status is ProjectStatus.FAILED
+    assert failed.current_artifacts == {}
 
     valid = add_source(database)
     clock["now"] += timedelta(seconds=1)
@@ -267,9 +338,24 @@ def test_permanent_evidence_failure_recovers_with_new_version(
     )
     second_job = UUID(second.json()["job_id"])
     second_reservation = GenerationRequestRepository(database).get_by_job_id(second_job)
+    assert second_reservation.artifact_id == first_reservation.artifact_id
     assert second_reservation.artifact_version == 2
     worker(database, tmp_path, clock, worker_id="recovery-worker").poll_once()
-    assert ProjectRepository(database).get(project.id).status is ProjectStatus.REVIEW_REQUIRED
+    recovered = ProjectRepository(database).get(project.id)
+    assert recovered.status is ProjectStatus.REVIEW_REQUIRED
+    assert recovered.current_artifacts[ArtifactKind.FACT_CARD].version == 2
+    assert (
+        tmp_path / ArtifactRepository(database).get(second_reservation.artifact_id, 2).storage_path
+    ).is_file()
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM generation_requests WHERE project_id=%s", (project.id,)
+        )
+        assert cursor.fetchone() == (2,)
+        cursor.execute("SELECT COUNT(*) FROM jobs WHERE project_id=%s", (project.id,))
+        assert cursor.fetchone() == (2,)
+        cursor.execute("SELECT version FROM artifacts WHERE project_id=%s", (project.id,))
+        assert cursor.fetchall() == [(2,)]
 
 
 def test_process_restart_recovers_expired_lease_without_duplicate_artifact(
@@ -294,6 +380,59 @@ def test_process_restart_recovers_expired_lease_without_duplicate_artifact(
 
     assert read_job_status(database, job_id) == JobStatus.SUCCEEDED.value
     assert ProjectRepository(database).get(project.id).status is ProjectStatus.REVIEW_REQUIRED
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM artifacts WHERE project_id=%s", (project.id,))
+        assert cursor.fetchone() == (1,)
+
+
+def test_file_written_before_terminal_failure_is_reused_after_lease_recovery(
+    database: Database,
+    api: tuple[TestClient, dict[str, datetime]],
+    tmp_path: Path,
+) -> None:
+    client, clock = api
+    project = add_project(database)
+    source = add_source(database)
+    response = client.post(
+        f"/projects/{project.id}/generate",
+        headers={"Idempotency-Key": "file-before-db"},
+        json=request_body(source.id),
+    )
+    job_id = UUID(response.json()["job_id"])
+    reservation = GenerationRequestRepository(database).get_by_job_id(job_id)
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """CREATE FUNCTION fail_slice_terminal() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'slice terminal failure'; END; $$"""
+        )
+        cursor.execute(
+            """CREATE TRIGGER slice_terminal_failure BEFORE UPDATE ON projects
+            FOR EACH ROW EXECUTE FUNCTION fail_slice_terminal()"""
+        )
+    first_worker = worker(database, tmp_path, clock, worker_id="crashing-worker")
+    try:
+        first_worker.poll_once()
+    finally:
+        with database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DROP TRIGGER slice_terminal_failure ON projects")
+            cursor.execute("DROP FUNCTION fail_slice_terminal()")
+
+    relative_path = (
+        f"fake/{project.id}/fact_card/"
+        f"{reservation.artifact_id}-v{reservation.artifact_version}.json"
+    )
+    artifact_file = tmp_path / relative_path
+    first_bytes = artifact_file.read_bytes()
+    assert read_job_status(database, job_id) == JobStatus.RUNNING.value
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM artifacts WHERE project_id=%s", (project.id,))
+        assert cursor.fetchone() == (0,)
+
+    clock["now"] += timedelta(seconds=10)
+    worker(database, tmp_path, clock, worker_id="recovery-worker").poll_once()
+
+    assert artifact_file.read_bytes() == first_bytes
+    assert read_job_status(database, job_id) == JobStatus.SUCCEEDED.value
     with database.connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM artifacts WHERE project_id=%s", (project.id,))
         assert cursor.fetchone() == (1,)

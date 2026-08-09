@@ -194,6 +194,14 @@ class JobStore:
             raise AdapterContractError(f"handler returned with non-terminal job: {job_id}")
         return status
 
+    def status(self, job_id: UUID) -> JobStatus:
+        with self.database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
+            row = cursor.fetchone()
+        if row is None:
+            raise AdapterContractError(f"job does not exist: {job_id}")
+        return JobStatus(row[0])
+
     def fail(
         self,
         job_id: UUID,

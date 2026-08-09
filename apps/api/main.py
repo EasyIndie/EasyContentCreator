@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, field_validator
 
 from apps.common.config import Settings, get_settings
 from apps.common.database import Database
@@ -26,6 +26,7 @@ from packages.pipeline import (
     GenerationRequestConflict,
     GenerationRequestRepository,
     JobStatus,
+    JobStore,
 )
 
 app = FastAPI(title="EasyContentCreator API", version="0.1.0")
@@ -99,7 +100,7 @@ class GenerationCreate(BaseModel):
 
     source_ids: list[UUID] = Field(min_length=1)
     template_version: NonEmptyText
-    budget_units: int = Field(gt=0)
+    budget_units: Annotated[StrictInt, Field(gt=0)]
 
     @field_validator("source_ids")
     @classmethod
@@ -159,6 +160,10 @@ def get_generation_repository(
     return GenerationRequestRepository(database)
 
 
+def get_job_store(database: Annotated[Database, Depends(get_database)]) -> JobStore:
+    return JobStore(database)
+
+
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code, content={"detail": {"code": code, "message": message}}
@@ -188,7 +193,7 @@ def invalid_transition_handler(
     return _error(
         status.HTTP_409_CONFLICT,
         "invalid_transition",
-        "review decision is not allowed for current project status",
+        "operation is not allowed for current project status",
     )
 
 
@@ -270,6 +275,7 @@ def generate_project(
     project_id: UUID,
     request: GenerationCreate,
     repository: Annotated[GenerationRequestRepository, Depends(get_generation_repository)],
+    jobs: Annotated[JobStore, Depends(get_job_store)],
     now: Annotated[datetime, Depends(utc_now)],
     idempotency_key: Annotated[
         str,
@@ -295,7 +301,7 @@ def generate_project(
     return GenerationResponse(
         job_id=reservation.job_id,
         project_id=project_id,
-        status=JobStatus.QUEUED,
+        status=jobs.status(reservation.job_id),
     )
 
 
