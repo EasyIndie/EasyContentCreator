@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ECC_", env_file=".env", extra="ignore")
 
     environment: str = "development"
+    version: str = "dev"
+    commit: str = "unknown"
     log_level: str = "INFO"
     database_url: str = Field(
         default="postgresql://easycontent:change-me@localhost:5432/easycontent",

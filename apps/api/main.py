@@ -15,8 +15,18 @@ class HealthResponse(BaseModel):
     database: str
 
 
+class VersionResponse(BaseModel):
+    version: str
+    commit: str
+
+
 def get_database(settings: Annotated[Settings, Depends(get_settings)]) -> Database:
     return Database(settings.database_url)
+
+
+@app.get("/version", response_model=VersionResponse)
+def version(settings: Annotated[Settings, Depends(get_settings)]) -> VersionResponse:
+    return VersionResponse(version=settings.version, commit=settings.commit)
 
 
 @app.get("/health/live", response_model=HealthResponse)
