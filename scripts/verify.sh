@@ -6,6 +6,7 @@ cd "$root"
 ./scripts/check-docs.sh
 
 if [[ -f pyproject.toml ]]; then
+  command -v ruff >/dev/null && ruff format --check .
   command -v ruff >/dev/null && ruff check .
   command -v mypy >/dev/null && mypy apps packages
   command -v pytest >/dev/null && pytest

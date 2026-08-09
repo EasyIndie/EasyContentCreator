@@ -11,6 +11,24 @@
 
 持续流限制为每名执行者一个主要任务、公共接口类任务全项目同时一个。任务预计超过两天时先拆分；阻塞一个工作周期后转入 `blocked` 并释放执行者。
 
+## 提交前验证
+
+统一入口 `./scripts/verify.sh` 与 PR/完整 CI 都会分别执行 Python 格式检查
+`ruff format --check .` 和 Lint `ruff check .`。格式检查只报告差异，不会改写文件；需要修复时先执行：
+
+```bash
+ruff format .
+```
+
+提交前执行完整本地门禁：
+
+```bash
+POSTGRES_PASSWORD=validation-only ./scripts/verify.sh
+```
+
+本地未安装 Ruff、Mypy 或 Pytest 时，验证脚本沿用可选工具语义并跳过缺失工具；CI 会安装开发依赖，
+因此提交前应按本地开发手册安装完整工具链，不能将本地跳过视为 CI 已通过。
+
 ## 每周校准
 
 每周只做一次短会：更新路线目标、选择 Ready 工作、清理阻塞，并记录周期时间、首次 CI 反馈时间、返工、Agent 首次验收通过率、部署失败率和恢复时间。重复缺陷优先转为自动检查。
