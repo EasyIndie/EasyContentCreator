@@ -1,6 +1,8 @@
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,6 +16,7 @@ from packages.domain import (
     ConcurrentUpdateError,
     ContentProject,
     ImmutableConflictError,
+    InvalidStateTransition,
     ProjectRepository,
     ProjectStatus,
     Review,
@@ -223,3 +226,81 @@ def test_repository_review_is_atomic_when_review_insert_fails(database: Database
         projects.apply_review(updated, review, expected_revision=1)
 
     assert projects.get(project.id) == project
+
+
+@pytest.mark.parametrize(
+    ("decision", "target"),
+    [
+        (ReviewDecision.APPROVE, ProjectStatus.APPROVED),
+        (ReviewDecision.REJECT, ProjectStatus.GENERATING),
+    ],
+)
+def test_repository_review_success_on_postgresql(
+    database: Database,
+    decision: ReviewDecision,
+    target: ProjectStatus,
+) -> None:
+    projects = ProjectRepository(database)
+    project = replace(project_at(ProjectStatus.REVIEW_REQUIRED), current_artifacts={})
+    projects.create(project)
+    updated = replace(
+        project,
+        title="attempted title mutation",
+        status=target,
+        revision=2,
+        updated_at=NOW,
+    )
+    review = Review(uuid4(), project.id, decision, "Reviewed", 2, NOW)
+
+    projects.apply_review(updated, review, expected_revision=1)
+
+    stored = projects.get(project.id)
+    assert stored.status is target
+    assert stored.revision == 2
+    assert stored.title == project.title
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT decision, project_revision FROM reviews WHERE id = %s", (review.id,))
+        assert cursor.fetchone() == (decision.value, 2)
+
+
+def test_repository_rejects_review_decision_status_mismatch(database: Database) -> None:
+    projects = ProjectRepository(database)
+    project = replace(project_at(ProjectStatus.REVIEW_REQUIRED), current_artifacts={})
+    projects.create(project)
+    mismatched = replace(project, status=ProjectStatus.GENERATING, revision=2)
+    review = Review(uuid4(), project.id, ReviewDecision.APPROVE, "Reviewed", 2, NOW)
+
+    with pytest.raises(InvalidStateTransition, match="cannot produce"):
+        projects.apply_review(mismatched, review, expected_revision=1)
+
+    assert projects.get(project.id) == project
+
+
+def test_concurrent_reviews_only_commit_one_record(database: Database) -> None:
+    projects = ProjectRepository(database)
+    project = replace(project_at(ProjectStatus.REVIEW_REQUIRED), current_artifacts={})
+    projects.create(project)
+    barrier = Barrier(2)
+
+    def apply(decision: ReviewDecision) -> str:
+        target = (
+            ProjectStatus.APPROVED
+            if decision is ReviewDecision.APPROVE
+            else ProjectStatus.GENERATING
+        )
+        updated = replace(project, status=target, revision=2)
+        review = Review(uuid4(), project.id, decision, "Concurrent review", 2, NOW)
+        barrier.wait()
+        try:
+            ProjectRepository(database).apply_review(updated, review, expected_revision=1)
+        except ConcurrentUpdateError:
+            return "conflict"
+        return "committed"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(apply, (ReviewDecision.APPROVE, ReviewDecision.REJECT)))
+
+    assert sorted(results) == ["committed", "conflict"]
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM reviews WHERE project_id = %s", (project.id,))
+        assert cursor.fetchone() == (1,)

@@ -7,6 +7,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from apps.common.database import Database
+from packages.domain.errors import InvalidStateTransition
 from packages.domain.models import (
     Artifact,
     ArtifactKind,
@@ -19,7 +20,7 @@ from packages.domain.models import (
     SourceExcerpt,
     SourceKind,
 )
-from packages.domain.reviews import Review
+from packages.domain.reviews import Review, ReviewDecision
 from packages.domain.types import FrozenJsonValue
 
 
@@ -220,19 +221,25 @@ class ProjectRepository:
             raise ValueError("review must reference the updated project revision")
         if project.revision != expected_revision + 1:
             raise ConcurrentUpdateError("updated project revision must equal expected_revision + 1")
+        expected_status = {
+            ReviewDecision.APPROVE: ProjectStatus.APPROVED,
+            ReviewDecision.REJECT: ProjectStatus.GENERATING,
+        }[review.decision]
+        if project.status is not expected_status or project.failed_stage is not None:
+            raise InvalidStateTransition(
+                f"review {review.decision} cannot produce project status {project.status}"
+            )
         with self._database.connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 UPDATE projects
-                SET title = %s, status = %s, updated_at = %s, revision = %s, failed_stage = %s
-                WHERE id = %s AND revision = %s
+                SET status = %s, updated_at = %s, revision = %s, failed_stage = NULL
+                WHERE id = %s AND revision = %s AND status = 'review_required'
                 """,
                 (
-                    project.title,
                     project.status.value,
                     project.updated_at,
                     project.revision,
-                    project.failed_stage.value if project.failed_stage else None,
                     project.id,
                     expected_revision,
                 ),
@@ -241,7 +248,6 @@ class ProjectRepository:
                 raise ConcurrentUpdateError(
                     f"project revision conflict: {project.id} expected {expected_revision}"
                 )
-            self._replace_current_artifacts(cursor, project)
             _insert_review(cursor, review)
 
     @staticmethod
