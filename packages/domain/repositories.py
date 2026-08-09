@@ -221,11 +221,11 @@ class ProjectRepository:
             raise ValueError("review must reference the updated project revision")
         if project.revision != expected_revision + 1:
             raise ConcurrentUpdateError("updated project revision must equal expected_revision + 1")
-        expected_status = {
-            ReviewDecision.APPROVE: ProjectStatus.APPROVED,
-            ReviewDecision.REJECT: ProjectStatus.GENERATING,
+        expected_outcome = {
+            ReviewDecision.APPROVE: (ProjectStatus.APPROVED, None),
+            ReviewDecision.REJECT: (ProjectStatus.FAILED, FailedStage.GENERATION),
         }[review.decision]
-        if project.status is not expected_status or project.failed_stage is not None:
+        if (project.status, project.failed_stage) != expected_outcome:
             raise InvalidStateTransition(
                 f"review {review.decision} cannot produce project status {project.status}"
             )
@@ -233,13 +233,14 @@ class ProjectRepository:
             cursor.execute(
                 """
                 UPDATE projects
-                SET status = %s, updated_at = %s, revision = %s, failed_stage = NULL
+                SET status = %s, updated_at = %s, revision = %s, failed_stage = %s
                 WHERE id = %s AND revision = %s AND status = 'review_required'
                 """,
                 (
                     project.status.value,
                     project.updated_at,
                     project.revision,
+                    project.failed_stage.value if project.failed_stage else None,
                     project.id,
                     expected_revision,
                 ),

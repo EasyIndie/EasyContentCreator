@@ -401,7 +401,7 @@ def review_project(
     target = (
         ProjectStatus.APPROVED
         if request.decision is ReviewDecision.APPROVE
-        else ProjectStatus.GENERATING
+        else ProjectStatus.FAILED
     )
     updated = transition_project(project, target, occurred_at=now)
     review = Review(
