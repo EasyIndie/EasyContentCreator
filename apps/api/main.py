@@ -1,3 +1,4 @@
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Annotated
@@ -9,7 +10,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    JsonValue,
     StrictInt,
     StringConstraints,
     field_validator,
@@ -62,10 +62,16 @@ class VersionResponse(BaseModel):
 
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+PUBLIC_METADATA_TOKEN_PATTERN = r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$"
+PublicMetadataToken = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=100, pattern=PUBLIC_METADATA_TOKEN_PATTERN),
+]
 ReviewNote = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
 ]
+PUBLIC_METADATA_TOKEN = re.compile(PUBLIC_METADATA_TOKEN_PATTERN)
 
 
 class ProjectCreate(BaseModel):
@@ -134,10 +140,29 @@ class ArtifactListResponse(BaseModel):
     items: list[ArtifactVersionSummaryResponse]
 
 
+class ArtifactGenerationParametersResponse(BaseModel):
+    source_ids: list[UUID] | None = None
+
+
+class ArtifactPublicMetadataResponse(BaseModel):
+    capability: PublicMetadataToken | None = None
+    template_version: PublicMetadataToken | None = None
+    parameters: ArtifactGenerationParametersResponse | None = None
+
+
 class ArtifactEvidenceResponse(ArtifactVersionSummaryResponse):
-    metadata: dict[str, JsonValue]
+    metadata: ArtifactPublicMetadataResponse
     upstream: list[ArtifactRefResponse]
     citations: list[ArtifactCitationResponse]
+
+
+class ErrorDetailResponse(BaseModel):
+    code: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    detail: ErrorDetailResponse
 
 
 class ReviewCreate(BaseModel):
@@ -271,18 +296,48 @@ def _artifact_summary(artifact: Artifact) -> ArtifactVersionSummaryResponse:
     )
 
 
-def _json_response_value(value: FrozenJsonValue) -> JsonValue:
-    if isinstance(value, Mapping):
-        return {key: _json_response_value(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_json_response_value(item) for item in value]
-    return value
+def _public_artifact_metadata(
+    metadata: Mapping[str, FrozenJsonValue],
+) -> ArtifactPublicMetadataResponse:
+    capability = metadata.get("capability")
+    template_version = metadata.get("template_version")
+    raw_parameters = metadata.get("parameters")
+    source_ids: list[UUID] | None = None
+    if isinstance(raw_parameters, Mapping):
+        raw_source_ids = raw_parameters.get("source_ids")
+        if isinstance(raw_source_ids, tuple):
+            try:
+                source_ids = [UUID(item) for item in raw_source_ids if isinstance(item, str)]
+            except ValueError:
+                source_ids = None
+            if source_ids is not None and len(source_ids) != len(raw_source_ids):
+                source_ids = None
+
+    parameters = (
+        ArtifactGenerationParametersResponse(source_ids=source_ids)
+        if source_ids is not None
+        else None
+    )
+    return ArtifactPublicMetadataResponse(
+        capability=(
+            capability
+            if isinstance(capability, str) and PUBLIC_METADATA_TOKEN.fullmatch(capability)
+            else None
+        ),
+        template_version=(
+            template_version
+            if isinstance(template_version, str)
+            and PUBLIC_METADATA_TOKEN.fullmatch(template_version)
+            else None
+        ),
+        parameters=parameters,
+    )
 
 
 def _artifact_evidence(artifact: Artifact) -> ArtifactEvidenceResponse:
     return ArtifactEvidenceResponse(
         **_artifact_summary(artifact).model_dump(),
-        metadata={key: _json_response_value(value) for key, value in artifact.metadata.items()},
+        metadata=_public_artifact_metadata(artifact.metadata),
         upstream=[_artifact_response(item) for item in artifact.upstream],
         citations=[
             ArtifactCitationResponse(
@@ -476,7 +531,11 @@ def get_job(
     )
 
 
-@app.get("/sources/{source_id}", response_model=SourceResponse)
+@app.get(
+    "/sources/{source_id}",
+    response_model=SourceResponse,
+    responses={status.HTTP_404_NOT_FOUND: {"model": ErrorResponse}},
+)
 def get_source(
     source_id: UUID,
     repository: Annotated[SourceRepository, Depends(get_source_repository)],
@@ -487,7 +546,11 @@ def get_source(
         raise _not_found("source not found") from error
 
 
-@app.get("/projects/{project_id}/artifacts", response_model=ArtifactListResponse)
+@app.get(
+    "/projects/{project_id}/artifacts",
+    response_model=ArtifactListResponse,
+    responses={status.HTTP_404_NOT_FOUND: {"model": ErrorResponse}},
+)
 def list_project_artifacts(
     project_id: UUID,
     projects: Annotated[ProjectRepository, Depends(get_project_repository)],
@@ -502,6 +565,8 @@ def list_project_artifacts(
 @app.get(
     "/artifacts/{artifact_id}/versions/{version}",
     response_model=ArtifactEvidenceResponse,
+    response_model_exclude_none=True,
+    responses={status.HTTP_404_NOT_FOUND: {"model": ErrorResponse}},
 )
 def get_artifact_evidence(
     artifact_id: UUID,

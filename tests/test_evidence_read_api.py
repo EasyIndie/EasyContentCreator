@@ -70,7 +70,11 @@ def evidence(database: Database) -> tuple[Source, Artifact, Artifact]:
         created_by="test",
         adapter="fake",
         citations=(SourceCitation(SOURCE_ID, EXCERPT_A, source.sha256),),
-        metadata={"nested": {"enabled": True}},
+        metadata={
+            "capability": "../../private",
+            "template_version": "/srv/private/template",
+            "parameters": {"source_ids": ("../source-id",)},
+        },
     )
     artifact = Artifact(
         ref=ArtifactRef(ARTIFACT_ID, 2, ArtifactKind.SCRIPT, "c" * 64),
@@ -84,7 +88,19 @@ def evidence(database: Database) -> tuple[Source, Artifact, Artifact]:
             SourceCitation(SOURCE_ID, EXCERPT_B, source.sha256),
             SourceCitation(SOURCE_ID, EXCERPT_A, source.sha256),
         ),
-        metadata={"template": "script-v1", "nested": {"score": 1, "tags": ("a", "b")}},
+        metadata={
+            "capability": "script",
+            "template_version": "script-v1",
+            "parameters": {
+                "source_ids": (str(SOURCE_ID),),
+                "path": "/srv/private/provider.json",
+            },
+            "storage_path": "private/never-read.json",
+            "nested": {
+                "file": "../../secrets.txt",
+                "filesystem": {"root": "/srv/private"},
+            },
+        },
     )
     repository = ArtifactRepository(database)
     repository.add(artifact=upstream)
@@ -131,8 +147,9 @@ def test_source_and_artifact_evidence_round_trip(
     body = detail.json()
     assert body["project_id"] == str(PROJECT_A)
     assert body["metadata"] == {
-        "template": "script-v1",
-        "nested": {"score": 1, "tags": ["a", "b"]},
+        "capability": "script",
+        "template_version": "script-v1",
+        "parameters": {"source_ids": [str(SOURCE_ID)]},
     }
     assert body["upstream"] == [
         {
@@ -155,6 +172,19 @@ def test_source_and_artifact_evidence_round_trip(
         },
     ]
     assert "storage_path" not in body
+    serialized_body = str(body)
+    assert "/srv/private" not in serialized_body
+    assert "../../secrets.txt" not in serialized_body
+    assert "path" not in body["metadata"]["parameters"]
+    assert "nested" not in body["metadata"]
+
+    unsafe_known_fields = client.get(
+        f"/artifacts/{upstream.ref.artifact_id}/versions/{upstream.ref.version}",
+        params={"project_id": str(PROJECT_A)},
+    )
+    assert unsafe_known_fields.status_code == 200
+    assert unsafe_known_fields.json()["metadata"] == {}
+    assert "../" not in str(unsafe_known_fields.json())
 
 
 def test_missing_and_cross_project_access_fail_closed(
@@ -200,6 +230,9 @@ def test_openapi_models_never_expose_storage_paths(client: TestClient) -> None:
     detail_operation = document["paths"]["/artifacts/{artifact_id}/versions/{version}"]["get"]
     assert detail_operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ArtifactEvidenceResponse"
+    }
+    assert detail_operation["responses"]["404"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
     }
     assert any(
         parameter["name"] == "project_id" and parameter["required"] is True
