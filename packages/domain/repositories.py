@@ -7,6 +7,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from apps.common.database import Database
+from packages.domain.errors import InvalidStateTransition
 from packages.domain.models import (
     Artifact,
     ArtifactKind,
@@ -19,6 +20,7 @@ from packages.domain.models import (
     SourceExcerpt,
     SourceKind,
 )
+from packages.domain.reviews import Review, ReviewDecision
 from packages.domain.types import FrozenJsonValue
 
 
@@ -57,6 +59,27 @@ def _artifact_ref(row: Mapping[str, Any], prefix: str = "") -> ArtifactRef:
         kind=ArtifactKind(row[f"{prefix}kind"]),
         sha256=row[f"{prefix}sha256"],
     )
+
+
+def _insert_review(cursor: Any, review: Review) -> None:
+    try:
+        cursor.execute(
+            """
+            INSERT INTO reviews
+                (id, project_id, decision, note, project_revision, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                review.id,
+                review.project_id,
+                review.decision.value,
+                review.note,
+                review.project_revision,
+                review.created_at,
+            ),
+        )
+    except errors.UniqueViolation as error:
+        raise ImmutableConflictError(f"review already exists: {review.id}") from error
 
 
 class ProjectRepository:
@@ -121,6 +144,46 @@ class ProjectRepository:
             current_artifacts=current,
         )
 
+    def list(self) -> tuple[ContentProject, ...]:
+        with (
+            self._database.connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SELECT * FROM projects ORDER BY created_at DESC, id DESC")
+            rows = cursor.fetchall()
+            projects = []
+            for row in rows:
+                cursor.execute(
+                    """
+                    SELECT pca.kind AS pointer_kind, a.id, a.version, a.kind, a.sha256
+                    FROM project_current_artifacts AS pca
+                    JOIN artifacts AS a
+                      ON (a.project_id, a.id, a.version) =
+                         (pca.project_id, pca.artifact_id, pca.artifact_version)
+                    WHERE pca.project_id = %s
+                    """,
+                    (row["id"],),
+                )
+                current = {
+                    ArtifactKind(item["pointer_kind"]): _artifact_ref(item)
+                    for item in cursor.fetchall()
+                }
+                projects.append(
+                    ContentProject(
+                        id=row["id"],
+                        title=row["title"],
+                        status=ProjectStatus(row["status"]),
+                        created_at=row["created_at"],
+                        updated_at=row["updated_at"],
+                        revision=row["revision"],
+                        failed_stage=(
+                            FailedStage(row["failed_stage"]) if row["failed_stage"] else None
+                        ),
+                        current_artifacts=current,
+                    )
+                )
+        return tuple(projects)
+
     def update(self, project: ContentProject, expected_revision: int) -> None:
         if project.revision != expected_revision + 1:
             raise ConcurrentUpdateError("updated project revision must equal expected_revision + 1")
@@ -147,6 +210,46 @@ class ProjectRepository:
                 )
             self._replace_current_artifacts(cursor, project)
 
+    def apply_review(
+        self,
+        project: ContentProject,
+        review: Review,
+        expected_revision: int,
+    ) -> None:
+        """Atomically update a project and append its immutable review record."""
+        if project.id != review.project_id or project.revision != review.project_revision:
+            raise ValueError("review must reference the updated project revision")
+        if project.revision != expected_revision + 1:
+            raise ConcurrentUpdateError("updated project revision must equal expected_revision + 1")
+        expected_status = {
+            ReviewDecision.APPROVE: ProjectStatus.APPROVED,
+            ReviewDecision.REJECT: ProjectStatus.GENERATING,
+        }[review.decision]
+        if project.status is not expected_status or project.failed_stage is not None:
+            raise InvalidStateTransition(
+                f"review {review.decision} cannot produce project status {project.status}"
+            )
+        with self._database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE projects
+                SET status = %s, updated_at = %s, revision = %s, failed_stage = NULL
+                WHERE id = %s AND revision = %s AND status = 'review_required'
+                """,
+                (
+                    project.status.value,
+                    project.updated_at,
+                    project.revision,
+                    project.id,
+                    expected_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentUpdateError(
+                    f"project revision conflict: {project.id} expected {expected_revision}"
+                )
+            _insert_review(cursor, review)
+
     @staticmethod
     def _replace_current_artifacts(cursor: Any, project: ContentProject) -> None:
         cursor.execute("DELETE FROM project_current_artifacts WHERE project_id = %s", (project.id,))
@@ -161,6 +264,16 @@ class ProjectRepository:
                 for kind, ref in project.current_artifacts.items()
             ],
         )
+
+
+class ReviewRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def add(self, review: Review) -> None:
+        """Insert one immutable review without changing project state."""
+        with self._database.connect() as connection, connection.cursor() as cursor:
+            _insert_review(cursor, review)
 
 
 class SourceRepository:
