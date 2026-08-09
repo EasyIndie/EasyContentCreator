@@ -105,6 +105,8 @@ def fact_card_artifact_id(project_id: UUID) -> UUID:
 
 
 def citations_for_sources(sources: Sequence[Source]) -> tuple[SourceCitation, ...]:
+    if not sources:
+        raise EvidenceSourceError("sources must not be empty")
     source_ids = [source.id for source in sources]
     if len(set(source_ids)) != len(source_ids):
         raise EvidenceSourceError("sources must not contain duplicates")

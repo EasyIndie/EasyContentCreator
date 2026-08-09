@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 
 from apps.common.database import Database
@@ -70,16 +71,24 @@ def mark_generation_failed(database: Database, project_id: UUID, occurred_at: da
 
 
 def test_spec_validation_and_canonical_hash_are_stable() -> None:
-    project_id = uuid4()
-    first_source, second_source = uuid4(), uuid4()
+    project_id = UUID("11111111-1111-1111-1111-111111111111")
+    first_source = UUID("22222222-2222-2222-2222-222222222222")
+    second_source = UUID("33333333-3333-3333-3333-333333333333")
     first = spec_for(project_id, second_source, first_source)
     reordered = spec_for(project_id, first_source, second_source)
 
     assert first.source_ids == tuple(sorted((first_source, second_source), key=str))
-    assert canonical_request_hash(first) == canonical_request_hash(reordered)
-    assert canonical_request_hash(first) != canonical_request_hash(
-        spec_for(project_id, first_source, second_source, budget_units=101)
+    assert canonical_request_hash(first) == (
+        "28931d29088363e766da25399a3ce379af68b35053a33b4bb5678ddea639ab24"
     )
+    assert canonical_request_hash(first) == canonical_request_hash(reordered)
+    variants = (
+        spec_for(uuid4(), first_source, second_source),
+        spec_for(project_id, first_source, uuid4()),
+        replace(first, template_version="fact-card-v2"),
+        replace(first, budget_units=101),
+    )
+    assert all(canonical_request_hash(first) != canonical_request_hash(item) for item in variants)
     with pytest.raises(ValueError, match="empty"):
         FactCardGenerationSpec(project_id, (), "v1", 1)
     with pytest.raises(ValueError, match="duplicates"):
@@ -124,8 +133,50 @@ def test_citations_cover_all_excerpts_in_stable_order() -> None:
     assert {item.source_sha256 for item in citations} == {"a" * 64, "b" * 64}
 
     empty = replace(source_a, id=uuid4(), excerpts=())
+    with pytest.raises(EvidenceSourceError, match="empty"):
+        citations_for_sources(())
+    with pytest.raises(EvidenceSourceError, match="duplicates"):
+        citations_for_sources((source_a, source_a))
     with pytest.raises(EvidenceSourceError, match="excerpt"):
         citations_for_sources((empty,))
+
+
+def test_reservation_transaction_rolls_back_all_writes_on_final_insert_failure(
+    database: Database,
+) -> None:
+    project = create_project(database)
+    spec = spec_for(project.id, uuid4())
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE FUNCTION fail_generation_request_insert() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                RAISE EXCEPTION 'injected generation request failure';
+            END;
+            $$
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TRIGGER generation_request_insert_failure
+            BEFORE INSERT ON generation_requests
+            FOR EACH ROW EXECUTE FUNCTION fail_generation_request_insert()
+            """
+        )
+    try:
+        with pytest.raises(psycopg.DatabaseError, match="injected generation request failure"):
+            GenerationRequestRepository(database).reserve_and_enqueue(
+                spec, "injected-failure", NOW, 3
+            )
+    finally:
+        with database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DROP TRIGGER generation_request_insert_failure ON generation_requests")
+            cursor.execute("DROP FUNCTION fail_generation_request_insert()")
+
+    assert ProjectRepository(database).get(project.id) == project
+    assert row_count(database, "jobs") == 0
+    assert row_count(database, "generation_requests") == 0
 
 
 def test_same_key_same_hash_reuses_one_reservation_and_job(database: Database) -> None:
@@ -227,3 +278,25 @@ def test_generation_failure_recovery_reserves_next_version(database: Database) -
     stored = ProjectRepository(database).get(project.id)
     assert stored.status is ProjectStatus.GENERATING
     assert stored.failed_stage is None
+
+
+def test_persisted_artifact_version_advances_reservation(database: Database) -> None:
+    project = create_project(database)
+    artifact_id = fact_card_artifact_id(project.id)
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO artifacts
+                (id, version, kind, sha256, project_id, storage_path, created_at,
+                 created_by, adapter)
+            VALUES (%s, 7, 'fact_card', %s, %s, %s, %s, 'fixture', 'fixture@1')
+            """,
+            (artifact_id, "a" * 64, project.id, "projects/history/fact-card-v7.json", NOW),
+        )
+
+    reservation = GenerationRequestRepository(database).reserve_and_enqueue(
+        spec_for(project.id, uuid4()), "after-history", NOW, 3
+    )
+
+    assert reservation.artifact_id == artifact_id
+    assert reservation.artifact_version == 8
