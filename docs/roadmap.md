@@ -4,7 +4,7 @@
 
 当前主开发里程碑为 M1。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞本地 M1 开发。
 
-M1 的 ECC-015 公共领域与适配器契约及 ECC-016 执行图已经完成。当前 Ready 为 ECC-017 PostgreSQL 持久化、ECC-018 确定性 Fake 与 ECC-024 本地/CI 格式门禁对齐；三项文件边界互不冲突，可使用独立 Worktree 并行。
+M1 的领域、PostgreSQL Repository、确定性 Fake、租约 Job、项目审核 API、证据规则和格式门禁已经完成。纵向集成预审发现生成身份与 Job 终态事务缺口，已由 ADR-005 拆为 ECC-025、ECC-026 两个前置任务。当前 Ready 仅为 ECC-025；ECC-026 与 ECC-023 必须按依赖顺序推进。
 
 ## 里程碑
 
@@ -34,17 +34,17 @@ ECC-001 ─┬─ ECC-002 ─ ECC-003 ─┬─ ECC-004 ─┐
 
 ```text
 ECC-015 ─ ECC-016 ─┬─ ECC-017 ─┬─ ECC-019 ─┐
-                   │           ├─ ECC-020 ─┼─ ECC-023
+                   │           ├─ ECC-020 ─┼─ ECC-025 ─ ECC-026 ─ ECC-023
                    │           │     └─ ECC-021
                    │           └─ ECC-022 ─┘
                    ├─ ECC-018 ──────────────┘
 ECC-005 ───────────└─ ECC-024
 ```
 
-- 已完成：ECC-015 领域/适配器契约，ECC-016 任务拆分。
-- 当前 Ready：ECC-017、ECC-018、ECC-024；公共数据库任务 ECC-017 同时最多一个执行者。
-- ECC-017 合并后，ECC-019、ECC-020、ECC-022 可并行；ECC-020 后可并行推进 ECC-021。
-- ECC-023 是唯一跨模块集成任务，必须等待 ECC-018、ECC-019、ECC-020、ECC-022 全部完成。
+- 已完成：ECC-015～ECC-020、ECC-022、ECC-024；ECC-021 可独立继续 Web 工作。
+- 当前 Ready：ECC-025 生成请求身份与版本契约。
+- ECC-026 状态为 backlog，依赖 ECC-025；ECC-023 状态为 backlog，依赖 ECC-025 与 ECC-026。
+- ECC-023 是唯一跨模块集成任务，只装配冻结接口并验证纵向切片，不再承担架构补洞。
 - M1 准出：Fake FACT_CARD 链路可从生成失败恢复到审核批准，不可变 Artifact 具备 Source/excerpt/摘要血缘，租约与幂等测试通过，Web 可执行人工审核，全量本地与 CI 门禁一致。
 
 ## 迭代机制

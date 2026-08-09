@@ -49,6 +49,8 @@ Artifact 不可覆盖，重新生成或编辑会创建新版本。每个版本�
 
 M1 公共 Python 契约位于 `packages/domain`、`packages/providers` 与 `packages/publishers`，使用不可变数据类、递归冻结的 JSON 元数据、字符串枚举、UUID 和 UTC 时间。Source 以内容摘要和结构化引用片段提供证据，Artifact 血缘引用固定来源摘要；ContentProject 使用单调 `revision` 支持 Repository 乐观并发。同步适配器协议不决定网络并发模型，超时与重试由 Worker 统一编排。错误分为可重试外部失败、永久业务失败、适配器契约失败和非法状态转换，详见 [ADR-004](decisions/ADR-004-domain-contracts.md)。
 
+生成请求在项目范围以 Idempotency-Key 和规范请求摘要持久化，并在同一事务中预留项目/kind 的逻辑 Artifact 单调版本、转换项目及 enqueue。生成 handler 拥有终态事务：成功时同时提交不可变 Artifact、证据、current pointer、项目状态和 Job succeeded，永久失败时同时提交审计产物、项目失败和 Job failed；RetryableError 仅重排原 Job。具体身份、citations 和崩溃恢复边界见 [ADR-005](decisions/ADR-005-generation-identity-transactions.md)。
+
 ## 数据、文件与安全
 
 PostgreSQL 保存实体、状态、任务租约、血缘、审核和发布记录；本地文件系统保存媒体内容，数据库仅保存受控根目录内的相对路径与摘要。密钥只从环境变量或 GitHub Environment Secrets 注入，不进入数据库正文、日志、样例或产物。
