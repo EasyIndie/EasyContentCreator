@@ -1,0 +1,5 @@
+# 将 @owner 替换为仓库实际 GitHub 用户或团队后启用强制审核。
+/packages/domain/ @owner
+/migrations/ @owner
+/deploy/ @owner
+/docs/decisions/ @owner

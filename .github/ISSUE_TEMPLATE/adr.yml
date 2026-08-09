@@ -1,0 +1,23 @@
+name: ADR Proposal
+description: 提议关键项目决策
+title: "[ADR] "
+labels: ["type:decision"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 待决定问题
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: 候选方案
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响范围
+    validations:
+      required: true

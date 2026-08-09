@@ -1,0 +1,23 @@
+name: Feature
+description: 提议可验收的用户价值
+title: "[Feature] "
+labels: ["type:feature", "status:backlog"]
+body:
+  - type: textarea
+    id: value
+    attributes:
+      label: 用户价值
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非目标
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+    validations:
+      required: true

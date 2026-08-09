@@ -1,0 +1,24 @@
+name: Task
+description: 执行仓库内 ECC 任务
+title: "[ECC-NNN] "
+labels: ["type:task", "status:ready"]
+body:
+  - type: input
+    id: task
+    attributes:
+      label: 任务文件
+      placeholder: docs/tasks/backlog/ECC-NNN.md
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依赖与阻塞条件
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收摘要
+    validations:
+      required: true

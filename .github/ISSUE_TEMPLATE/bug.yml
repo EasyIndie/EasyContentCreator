@@ -1,0 +1,23 @@
+name: Bug
+description: 报告可复现缺陷
+title: "[Bug] "
+labels: ["type:bug", "status:backlog"]
+body:
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为与证据
+    validations:
+      required: true
