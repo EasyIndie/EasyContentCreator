@@ -22,7 +22,7 @@ class StubJobs:
     def __init__(self, job: Job | None = None) -> None:
         self.job = job
         self.claims = 0
-        self.succeeded: list[UUID] = []
+        self.terminal_status = JobStatus.SUCCEEDED
         self.failures: list[Exception] = []
 
     def claim(self, worker_id: str, now: datetime, lease_for: timedelta) -> Job | None:
@@ -33,8 +33,8 @@ class StubJobs:
     def heartbeat(self, job_id: UUID, worker_id: str, now: datetime, lease_for: timedelta) -> None:
         return None
 
-    def succeed(self, job_id: UUID, worker_id: str, now: datetime) -> None:
-        self.succeeded.append(job_id)
+    def require_terminal(self, job_id: UUID) -> JobStatus:
+        return self.terminal_status
 
     def fail(
         self,
