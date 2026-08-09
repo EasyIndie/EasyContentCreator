@@ -286,12 +286,31 @@ def test_repository_review_success_on_postgresql(
         assert cursor.fetchone() == (decision.value, 2)
 
 
-def test_repository_rejects_review_decision_status_mismatch(database: Database) -> None:
+@pytest.mark.parametrize(
+    ("decision", "status", "failed_stage"),
+    [
+        (ReviewDecision.APPROVE, ProjectStatus.GENERATING, None),
+        (ReviewDecision.APPROVE, ProjectStatus.FAILED, FailedStage.GENERATION),
+        (ReviewDecision.REJECT, ProjectStatus.APPROVED, None),
+        (ReviewDecision.REJECT, ProjectStatus.FAILED, FailedStage.PUBLICATION),
+    ],
+)
+def test_repository_rejects_review_decision_status_mismatch(
+    database: Database,
+    decision: ReviewDecision,
+    status: ProjectStatus,
+    failed_stage: FailedStage | None,
+) -> None:
     projects = ProjectRepository(database)
     project = replace(project_at(ProjectStatus.REVIEW_REQUIRED), current_artifacts={})
     projects.create(project)
-    mismatched = replace(project, status=ProjectStatus.GENERATING, revision=2)
-    review = Review(uuid4(), project.id, ReviewDecision.APPROVE, "Reviewed", 2, NOW)
+    mismatched = replace(
+        project,
+        status=status,
+        failed_stage=failed_stage,
+        revision=2,
+    )
+    review = Review(uuid4(), project.id, decision, "Reviewed", 2, NOW)
 
     with pytest.raises(InvalidStateTransition, match="cannot produce"):
         projects.apply_review(mismatched, review, expected_revision=1)

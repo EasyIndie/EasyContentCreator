@@ -334,6 +334,21 @@ def test_rejection_preserves_artifact_and_recovers_only_with_new_key(
     }
     assert ProjectRepository(database).get(project.id).status is ProjectStatus.FAILED
 
+    conflicting_body = {**body, "template_version": "fact-card-v2"}
+    conflict = client.post(
+        url,
+        headers={"Idempotency-Key": "first-version"},
+        json=conflicting_body,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "detail": {
+            "code": "idempotency_conflict",
+            "message": "Idempotency-Key was already used with a different request",
+        }
+    }
+    assert ProjectRepository(database).get(project.id).status is ProjectStatus.FAILED
+
     clock["now"] += timedelta(seconds=1)
     recovery = client.post(url, headers={"Idempotency-Key": "second-version"}, json=body)
     second_job = UUID(recovery.json()["job_id"])

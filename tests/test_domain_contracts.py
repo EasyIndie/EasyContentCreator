@@ -94,6 +94,15 @@ def test_review_failure_cannot_recover_as_approved() -> None:
         transition_project(failed, ProjectStatus.APPROVED, occurred_at=NOW)
 
 
+def test_review_required_cannot_transition_directly_to_generating() -> None:
+    with pytest.raises(InvalidStateTransition, match="cannot transition"):
+        transition_project(
+            project(ProjectStatus.REVIEW_REQUIRED),
+            ProjectStatus.GENERATING,
+            occurred_at=NOW,
+        )
+
+
 def test_transition_rejects_time_regression() -> None:
     later = datetime(2026, 8, 10, tzinfo=UTC)
     value = ContentProject(uuid4(), "Demo", ProjectStatus.DRAFT, NOW, later)
