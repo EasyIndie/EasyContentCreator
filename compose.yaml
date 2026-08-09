@@ -1,0 +1,48 @@
+name: easy-content-creator
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecc}
+      POSTGRES_USER: ${POSTGRES_USER:-ecc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    image: ${ECC_IMAGE:-easy-content-creator:dev}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ecc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecc}
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    volumes: [artifacts:/data/artifacts]
+    restart: unless-stopped
+  worker:
+    image: ${ECC_IMAGE:-easy-content-creator:dev}
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ecc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecc}
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes: [artifacts:/data/artifacts]
+    command: ["python", "-m", "apps.worker"]
+    restart: unless-stopped
+  web:
+    image: ${ECC_WEB_IMAGE:-easy-content-creator-web:dev}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports: ["127.0.0.1:${WEB_PORT:-3000}:80"]
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  artifacts:

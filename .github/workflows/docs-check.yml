@@ -1,0 +1,15 @@
+name: Docs Check
+on:
+  pull_request:
+    paths: ['docs/**', 'AGENTS.md', 'scripts/check-docs.sh', '.github/workflows/docs-check.yml']
+  push: {branches: [main], paths: ['docs/**', 'AGENTS.md']}
+concurrency: {group: 'docs-${{ github.ref }}', cancel-in-progress: true}
+permissions: {contents: read}
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-docs.sh
+      - uses: lycheeverse/lychee-action@v2
+        with: {args: '--no-progress --offline AGENTS.md README.md docs/**/*.md'}

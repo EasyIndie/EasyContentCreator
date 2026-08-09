@@ -1,0 +1,28 @@
+name: Deploy Production
+on:
+  workflow_dispatch:
+    inputs:
+      image_ref: {description: 'Staging-approved ghcr.io image including @sha256 digest', required: true, type: string}
+      web_image_ref: {description: 'Staging-approved web image including @sha256 digest', required: true, type: string}
+concurrency: {group: deploy-production, cancel-in-progress: false}
+permissions: {contents: read, packages: read}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require immutable image
+        env: {IMAGE_REF: '${{ inputs.image_ref }}', WEB_IMAGE_REF: '${{ inputs.web_image_ref }}'}
+        run: '[[ "$IMAGE_REF" == ghcr.io/*@sha256:* && "$WEB_IMAGE_REF" == ghcr.io/*@sha256:* ]]'
+      - uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_REF: '${{ inputs.image_ref }}'
+          WEB_IMAGE_REF: '${{ inputs.web_image_ref }}'
+          BACKUP_DIR: '${{ secrets.BACKUP_DIR }}'
+        with:
+          host: '${{ secrets.SSH_HOST }}'
+          username: '${{ secrets.SSH_USER }}'
+          key: '${{ secrets.SSH_PRIVATE_KEY }}'
+          envs: IMAGE_REF,WEB_IMAGE_REF,BACKUP_DIR
+          script: cd "${{ secrets.DEPLOY_PATH }}" && IMAGE_REF="$IMAGE_REF" WEB_IMAGE_REF="$WEB_IMAGE_REF" BACKUP_DIR="$BACKUP_DIR" ./deploy/deploy.sh
