@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from apps.common.database import Database
 from packages.domain.errors import AdapterContractError, RetryableError
+from packages.domain.repositories import EntityNotFoundError
 from packages.domain.types import FrozenJsonValue, freeze_json_mapping
 
 
@@ -24,6 +26,9 @@ class JobStatus(StrEnum):
 
 class LostLeaseError(Exception):
     """The worker no longer owns a live lease for the requested Job."""
+
+
+_SAFE_ERROR_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
 def _utc(value: datetime) -> datetime:
@@ -79,6 +84,27 @@ class Job:
         object.__setattr__(self, "updated_at", _utc(self.updated_at))
         if self.lease_expires_at is not None:
             object.__setattr__(self, "lease_expires_at", _utc(self.lease_expires_at))
+
+
+@dataclass(frozen=True, slots=True)
+class JobView:
+    """Operator-safe Job projection that never contains payload or lease details."""
+
+    id: UUID
+    project_id: UUID
+    kind: str
+    status: JobStatus
+    attempt: int
+    max_attempts: int
+    available_at: datetime
+    error_class: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "available_at", _utc(self.available_at))
+        object.__setattr__(self, "created_at", _utc(self.created_at))
+        object.__setattr__(self, "updated_at", _utc(self.updated_at))
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,8 +225,39 @@ class JobStore:
             cursor.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
             row = cursor.fetchone()
         if row is None:
-            raise AdapterContractError(f"job does not exist: {job_id}")
+            raise EntityNotFoundError(f"job does not exist: {job_id}")
         return JobStatus(row[0])
+
+    def get_view(self, job_id: UUID) -> JobView:
+        with (
+            self.database.connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """SELECT id, project_id, kind, status, attempt, max_attempts,
+                available_at, last_error, created_at, updated_at
+                FROM jobs WHERE id = %s""",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise EntityNotFoundError(f"job does not exist: {job_id}")
+        return _job_view_from_row(row)
+
+    def list_views(self, project_id: UUID) -> tuple[JobView, ...]:
+        with (
+            self.database.connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """SELECT id, project_id, kind, status, attempt, max_attempts,
+                available_at, last_error, created_at, updated_at
+                FROM jobs WHERE project_id = %s
+                ORDER BY created_at DESC, id DESC""",
+                (project_id,),
+            )
+            rows = cursor.fetchall()
+        return tuple(_job_view_from_row(row) for row in rows)
 
     def fail(
         self,
@@ -268,6 +325,27 @@ def _job_from_row(row: Mapping[str, Any]) -> Job:
         lease_owner=row["lease_owner"],
         lease_expires_at=row["lease_expires_at"],
         last_error=row["last_error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _job_view_from_row(row: Mapping[str, Any]) -> JobView:
+    last_error = row["last_error"]
+    safe_error = (
+        last_error
+        if last_error is None or _SAFE_ERROR_CLASS.fullmatch(last_error) is not None
+        else "UnknownError"
+    )
+    return JobView(
+        id=row["id"],
+        project_id=row["project_id"],
+        kind=row["kind"],
+        status=JobStatus(row["status"]),
+        attempt=row["attempt"],
+        max_attempts=row["max_attempts"],
+        available_at=row["available_at"],
+        error_class=safe_error,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

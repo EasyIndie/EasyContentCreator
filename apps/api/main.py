@@ -14,6 +14,7 @@ from packages.domain import (
     ConcurrentUpdateError,
     ContentProject,
     EntityNotFoundError,
+    FailedStage,
     InvalidStateTransition,
     ProjectRepository,
     ProjectStatus,
@@ -27,6 +28,7 @@ from packages.pipeline import (
     GenerationRequestRepository,
     JobStatus,
     JobStore,
+    JobView,
 )
 
 app = FastAPI(title="EasyContentCreator API", version="0.1.0")
@@ -116,6 +118,24 @@ class GenerationResponse(BaseModel):
     status: JobStatus
 
 
+class JobResponse(BaseModel):
+    id: UUID
+    project_id: UUID
+    kind: str
+    status: JobStatus
+    attempt: int
+    max_attempts: int
+    available_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    error_class: str | None
+    recoverable: bool
+
+
+class JobListResponse(BaseModel):
+    items: list[JobResponse]
+
+
 def _artifact_response(ref: ArtifactRef) -> ArtifactRefResponse:
     return ArtifactRefResponse(
         artifact_id=ref.artifact_id,
@@ -137,6 +157,26 @@ def _project_response(project: ContentProject) -> ProjectResponse:
         current_artifacts={
             kind: _artifact_response(ref) for kind, ref in project.current_artifacts.items()
         },
+    )
+
+
+def _job_response(job: JobView, project: ContentProject) -> JobResponse:
+    return JobResponse(
+        id=job.id,
+        project_id=job.project_id,
+        kind=job.kind,
+        status=job.status,
+        attempt=job.attempt,
+        max_attempts=job.max_attempts,
+        available_at=job.available_at,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        error_class=job.error_class,
+        recoverable=(
+            project.status is ProjectStatus.FAILED
+            and project.failed_stage is FailedStage.GENERATION
+            and job.status is JobStatus.FAILED
+        ),
     )
 
 
@@ -264,6 +304,28 @@ def get_project(
     repository: Annotated[ProjectRepository, Depends(get_project_repository)],
 ) -> ProjectResponse:
     return _project_response(repository.get(project_id))
+
+
+@app.get("/projects/{project_id}/jobs", response_model=JobListResponse)
+def list_project_jobs(
+    project_id: UUID,
+    projects: Annotated[ProjectRepository, Depends(get_project_repository)],
+    jobs: Annotated[JobStore, Depends(get_job_store)],
+) -> JobListResponse:
+    project = projects.get(project_id)
+    return JobListResponse(
+        items=[_job_response(job, project) for job in jobs.list_views(project_id)]
+    )
+
+
+@app.get("/jobs/{job_id}", response_model=JobResponse)
+def get_job(
+    job_id: UUID,
+    projects: Annotated[ProjectRepository, Depends(get_project_repository)],
+    jobs: Annotated[JobStore, Depends(get_job_store)],
+) -> JobResponse:
+    job = jobs.get_view(job_id)
+    return _job_response(job, projects.get(job.project_id))
 
 
 @app.post(

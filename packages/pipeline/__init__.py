@@ -24,6 +24,7 @@ from packages.pipeline.jobs import (
     JobHandler,
     JobStatus,
     JobStore,
+    JobView,
     LostLeaseError,
 )
 
@@ -43,6 +44,7 @@ __all__ = [
     "JobHandler",
     "JobStatus",
     "JobStore",
+    "JobView",
     "LostLeaseError",
     "canonical_request_hash",
     "citations_for_sources",
