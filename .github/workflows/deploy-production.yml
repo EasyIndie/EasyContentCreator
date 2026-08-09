@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Require immutable image
         env: {IMAGE_REF: '${{ inputs.image_ref }}', WEB_IMAGE_REF: '${{ inputs.web_image_ref }}'}
         run: '[[ "$IMAGE_REF" == ghcr.io/*@sha256:* && "$WEB_IMAGE_REF" == ghcr.io/*@sha256:* ]]'
