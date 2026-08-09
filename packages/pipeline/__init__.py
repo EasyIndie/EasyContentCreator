@@ -22,8 +22,10 @@ from packages.pipeline.jobs import (
     Job,
     JobBackend,
     JobHandler,
+    JobNotFoundError,
     JobStatus,
     JobStore,
+    JobView,
     LostLeaseError,
 )
 
@@ -41,8 +43,10 @@ __all__ = [
     "Job",
     "JobBackend",
     "JobHandler",
+    "JobNotFoundError",
     "JobStatus",
     "JobStore",
+    "JobView",
     "LostLeaseError",
     "canonical_request_hash",
     "citations_for_sources",
