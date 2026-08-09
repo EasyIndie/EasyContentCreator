@@ -1,0 +1,1 @@
+"""Database polling worker application."""

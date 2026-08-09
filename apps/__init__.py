@@ -1,0 +1,1 @@
+"""EasyContentCreator executable applications."""
