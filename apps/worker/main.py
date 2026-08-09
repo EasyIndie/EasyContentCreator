@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from apps.common.config import get_settings
 from apps.common.database import Database
-from packages.domain.errors import PermanentError
+from packages.domain.errors import AdapterContractError, PermanentError, RetryableError
 from packages.pipeline import Job, JobBackend, JobHandler, JobStore, LostLeaseError
 
 LOGGER = logging.getLogger(__name__)
@@ -76,16 +76,21 @@ class PollingWorker:
         heartbeat_thread.start()
         try:
             handler(job)
-        except Exception as error:
+        except RetryableError as error:
             self._fail(job, error)
+        except Exception as error:
+            LOGGER.warning(
+                "job handler exited without terminal commit",
+                extra={**self._log_context(job), "error_class": type(error).__name__},
+            )
         else:
             if heartbeat_error:
                 LOGGER.warning("job lease lost before completion", extra=self._log_context(job))
             else:
                 try:
-                    self._jobs.succeed(job.id, self._worker_id, self._clock())
-                except LostLeaseError:
-                    LOGGER.warning("job lease lost before completion", extra=self._log_context(job))
+                    self._jobs.require_terminal(job.id)
+                except AdapterContractError as error:
+                    self._fail(job, error)
         finally:
             finished.set()
             heartbeat_thread.join()

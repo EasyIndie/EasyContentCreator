@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from apps.common.database import Database
-from packages.domain.errors import RetryableError
+from packages.domain.errors import AdapterContractError, RetryableError
 from packages.domain.types import FrozenJsonValue, freeze_json_mapping
 
 
@@ -183,19 +183,16 @@ class JobStore:
             job_id,
         )
 
-    def succeed(self, job_id: UUID, worker_id: str, now: datetime) -> None:
-        now = _utc(now)
-        self._finish_lease_operation(
-            """
-            UPDATE jobs
-            SET status = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
-                last_error = NULL, updated_at = %s
-            WHERE id = %s AND status = 'running' AND lease_owner = %s
-              AND lease_expires_at > %s
-            """,
-            (now, job_id, worker_id, now),
-            job_id,
-        )
+    def require_terminal(self, job_id: UUID) -> JobStatus:
+        with self.database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
+            row = cursor.fetchone()
+        if row is None:
+            raise AdapterContractError(f"handler job does not exist: {job_id}")
+        status = JobStatus(row[0])
+        if status not in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+            raise AdapterContractError(f"handler returned with non-terminal job: {job_id}")
+        return status
 
     def fail(
         self,
@@ -278,7 +275,7 @@ class JobBackend(Protocol):
         self, job_id: UUID, worker_id: str, now: datetime, lease_for: timedelta
     ) -> None: ...
 
-    def succeed(self, job_id: UUID, worker_id: str, now: datetime) -> None: ...
+    def require_terminal(self, job_id: UUID) -> JobStatus: ...
 
     def fail(
         self,

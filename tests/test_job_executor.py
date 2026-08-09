@@ -20,7 +20,7 @@ from packages.domain import (
 )
 from packages.pipeline import Job, JobStatus, JobStore, LostLeaseError
 
-NOW = datetime.now(UTC) + timedelta(seconds=1)
+NOW = datetime.now(UTC) + timedelta(minutes=1)
 LEASE = timedelta(seconds=10)
 
 
@@ -85,8 +85,6 @@ def test_worker_that_lost_lease_cannot_commit_or_heartbeat(database: Database) -
     with pytest.raises(LostLeaseError):
         store.heartbeat(job_id, "worker-1", recovered_at, LEASE)
     with pytest.raises(LostLeaseError):
-        store.succeed(job_id, "worker-1", recovered_at)
-    with pytest.raises(LostLeaseError):
         store.fail(
             job_id,
             "worker-1",
@@ -95,8 +93,14 @@ def test_worker_that_lost_lease_cannot_commit_or_heartbeat(database: Database) -
             recovered_at + timedelta(seconds=1),
         )
 
-    store.succeed(job_id, "worker-2", recovered_at)
-    assert read_job(database, job_id)["status"] == JobStatus.SUCCEEDED.value
+    store.fail(
+        job_id,
+        "worker-2",
+        PermanentError("terminal fixture"),
+        recovered_at,
+        recovered_at,
+    )
+    assert read_job(database, job_id)["status"] == JobStatus.FAILED.value
 
 
 def test_retryable_error_requeues_until_attempts_are_exhausted(database: Database) -> None:
@@ -154,8 +158,8 @@ class CountingStore:
         self.delegate.heartbeat(job_id, worker_id, now, lease_for)
         self.heartbeats += 1
 
-    def succeed(self, job_id: UUID, worker_id: str, now: datetime) -> None:
-        self.delegate.succeed(job_id, worker_id, now)
+    def require_terminal(self, job_id: UUID) -> JobStatus:
+        return self.delegate.require_terminal(job_id)
 
     def fail(
         self,
@@ -174,10 +178,22 @@ def test_polling_worker_heartbeats_during_handler(database: Database) -> None:
     now = datetime.now(UTC)
     job_id = store.enqueue("slow", project_id, {}, 2, now)
     counting = CountingStore(store)
+
+    def slow_handler(job: Job) -> None:
+        sleep(0.18)
+        now = datetime.now(UTC)
+        store.fail(
+            job.id,
+            "worker-heartbeat",
+            PermanentError("completed fixture"),
+            now,
+            now,
+        )
+
     worker = PollingWorker(
         database,
         poll_interval_seconds=0.01,
-        handlers={"slow": lambda _job: sleep(0.18)},
+        handlers={"slow": slow_handler},
         worker_id="worker-heartbeat",
         lease_for=timedelta(seconds=0.09),
         heartbeat_interval_seconds=0.02,
@@ -187,4 +203,4 @@ def test_polling_worker_heartbeats_during_handler(database: Database) -> None:
     worker.poll_once()
 
     assert counting.heartbeats >= 2
-    assert read_job(database, job_id)["status"] == JobStatus.SUCCEEDED.value
+    assert read_job(database, job_id)["status"] == JobStatus.FAILED.value

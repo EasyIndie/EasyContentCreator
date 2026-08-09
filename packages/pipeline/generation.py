@@ -13,6 +13,8 @@ from psycopg.types.json import Jsonb
 
 from apps.common.database import Database
 from packages.domain import (
+    Artifact,
+    ArtifactKind,
     ContentProject,
     EntityNotFoundError,
     FailedStage,
@@ -23,9 +25,18 @@ from packages.domain import (
     SourceCitation,
     transition_project,
 )
+from packages.pipeline.evidence import validate_artifact_evidence
 
 FACT_CARD_JOB_KIND = "generate_fact_card"
 FACT_CARD_ID_NAME = "artifact:fact_card"
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
 
 
 class GenerationRequestConflict(PermanentError):
@@ -273,6 +284,238 @@ class GenerationRequestRepository:
             reserved = cursor.fetchone()
             assert reserved is not None
             return _reservation_from_row(reserved)
+
+    def get_by_job_id(self, job_id: UUID) -> GenerationReservation:
+        with (
+            self._database.connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SELECT * FROM generation_requests WHERE job_id = %s", (job_id,))
+            row = cursor.fetchone()
+        if row is None:
+            raise EntityNotFoundError(f"generation reservation not found for job: {job_id}")
+        return _reservation_from_row(row)
+
+
+class GenerationTerminalRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def succeed(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        now: datetime,
+        artifact: Artifact,
+        sources_by_id: Mapping[UUID, Source],
+    ) -> None:
+        report = validate_artifact_evidence(artifact, sources_by_id)
+        if not report.valid:
+            raise EvidenceSourceError("artifact evidence validation failed")
+        with (
+            self._database.connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            reservation, project = self._lock_context(cursor, job_id, worker_id, _utc(now))
+            self._validate_artifact(reservation, artifact)
+            self._insert_artifact(cursor, artifact)
+            cursor.execute(
+                """
+                INSERT INTO project_current_artifacts
+                    (project_id, kind, artifact_id, artifact_version)
+                VALUES (%s, 'fact_card', %s, %s)
+                ON CONFLICT (project_id, kind) DO UPDATE
+                SET artifact_id = EXCLUDED.artifact_id,
+                    artifact_version = EXCLUDED.artifact_version
+                """,
+                (artifact.project_id, artifact.ref.artifact_id, artifact.ref.version),
+            )
+            self._finish_project(cursor, project, ProjectStatus.REVIEW_REQUIRED, now)
+            self._finish_job(cursor, job_id, worker_id, now, "succeeded", None)
+
+    def fail_permanently(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        now: datetime,
+        error_class: str,
+        artifact: Artifact | None = None,
+    ) -> None:
+        if not error_class.strip():
+            raise ValueError("error_class is required")
+        with (
+            self._database.connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            reservation, project = self._lock_context(cursor, job_id, worker_id, _utc(now))
+            if artifact is not None:
+                self._validate_artifact(reservation, artifact)
+                self._insert_artifact(cursor, artifact)
+            self._finish_project(cursor, project, ProjectStatus.FAILED, now)
+            self._finish_job(cursor, job_id, worker_id, now, "failed", error_class)
+
+    @staticmethod
+    def _lock_context(
+        cursor: Any, job_id: UUID, worker_id: str, now: datetime
+    ) -> tuple[GenerationReservation, ContentProject]:
+        cursor.execute(
+            """
+            SELECT j.*, g.idempotency_key, g.request_hash, g.artifact_id,
+                   g.artifact_version, g.source_ids, g.template_version,
+                   g.budget_units, g.project_revision, g.created_at AS request_created_at
+            FROM jobs j JOIN generation_requests g ON g.job_id = j.id
+            WHERE j.id = %s FOR UPDATE OF j, g
+            """,
+            (job_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise EntityNotFoundError(f"generation job not found: {job_id}")
+        if (
+            row["status"] != "running"
+            or row["lease_owner"] != worker_id
+            or row["lease_expires_at"] <= now
+        ):
+            from packages.pipeline.jobs import LostLeaseError
+
+            raise LostLeaseError(f"live lease not held for job {job_id}")
+        cursor.execute("SELECT * FROM projects WHERE id = %s FOR UPDATE", (row["project_id"],))
+        project_row = cursor.fetchone()
+        if project_row is None:
+            raise EntityNotFoundError(f"project not found: {row['project_id']}")
+        project = ContentProject(
+            project_row["id"],
+            project_row["title"],
+            ProjectStatus(project_row["status"]),
+            project_row["created_at"],
+            project_row["updated_at"],
+            project_row["revision"],
+            FailedStage(project_row["failed_stage"]) if project_row["failed_stage"] else None,
+        )
+        if (
+            project.status is not ProjectStatus.GENERATING
+            or project.revision != row["project_revision"]
+        ):
+            raise InvalidStateTransition("generation reservation no longer matches project")
+        reservation = _reservation_from_row(
+            {
+                "project_id": row["project_id"],
+                "source_ids": row["source_ids"],
+                "template_version": row["template_version"],
+                "budget_units": row["budget_units"],
+                "idempotency_key": row["idempotency_key"],
+                "request_hash": row["request_hash"],
+                "job_id": row["id"],
+                "artifact_id": row["artifact_id"],
+                "artifact_version": row["artifact_version"],
+                "project_revision": row["project_revision"],
+                "created_at": row["request_created_at"],
+            }
+        )
+        return reservation, project
+
+    @staticmethod
+    def _validate_artifact(reservation: GenerationReservation, artifact: Artifact) -> None:
+        if (
+            artifact.project_id != reservation.spec.project_id
+            or artifact.ref.kind is not ArtifactKind.FACT_CARD
+            or artifact.ref.artifact_id != reservation.artifact_id
+            or artifact.ref.version != reservation.artifact_version
+        ):
+            raise EvidenceSourceError("artifact does not match generation reservation")
+
+    @staticmethod
+    def _insert_artifact(cursor: Any, artifact: Artifact) -> None:
+        cursor.execute(
+            """INSERT INTO artifacts
+            (id, version, kind, sha256, project_id, storage_path, created_at,
+             created_by, adapter, metadata)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                artifact.ref.artifact_id,
+                artifact.ref.version,
+                artifact.ref.kind.value,
+                artifact.ref.sha256,
+                artifact.project_id,
+                artifact.storage_path,
+                artifact.created_at,
+                artifact.created_by,
+                artifact.adapter,
+                Jsonb(_thaw_json(artifact.metadata)),
+            ),
+        )
+        cursor.executemany(
+            """INSERT INTO artifact_upstream
+            (project_id, artifact_id, artifact_version, position, upstream_id, upstream_version)
+            VALUES (%s,%s,%s,%s,%s,%s)""",
+            [
+                (
+                    artifact.project_id,
+                    artifact.ref.artifact_id,
+                    artifact.ref.version,
+                    pos,
+                    ref.artifact_id,
+                    ref.version,
+                )
+                for pos, ref in enumerate(artifact.upstream)
+            ],
+        )
+        cursor.executemany(
+            """INSERT INTO artifact_citations
+            (artifact_id, artifact_version, position, source_id, excerpt_id, source_sha256)
+            VALUES (%s,%s,%s,%s,%s,%s)""",
+            [
+                (
+                    artifact.ref.artifact_id,
+                    artifact.ref.version,
+                    pos,
+                    citation.source_id,
+                    citation.excerpt_id,
+                    citation.source_sha256,
+                )
+                for pos, citation in enumerate(artifact.citations)
+            ],
+        )
+
+    @staticmethod
+    def _finish_project(
+        cursor: Any, project: ContentProject, target: ProjectStatus, now: datetime
+    ) -> None:
+        updated = transition_project(project, target, occurred_at=_utc(now))
+        cursor.execute(
+            """UPDATE projects SET status=%s, revision=%s, updated_at=%s, failed_stage=%s
+            WHERE id=%s AND revision=%s AND status='generating'""",
+            (
+                updated.status.value,
+                updated.revision,
+                updated.updated_at,
+                updated.failed_stage.value if updated.failed_stage else None,
+                project.id,
+                project.revision,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise InvalidStateTransition("project changed during generation terminal transaction")
+
+    @staticmethod
+    def _finish_job(
+        cursor: Any,
+        job_id: UUID,
+        worker_id: str,
+        now: datetime,
+        status: str,
+        error_class: str | None,
+    ) -> None:
+        cursor.execute(
+            """UPDATE jobs SET status=%s, lease_owner=NULL, lease_expires_at=NULL,
+            last_error=%s, updated_at=%s WHERE id=%s AND status='running'
+            AND lease_owner=%s AND lease_expires_at>%s""",
+            (status, error_class, _utc(now), job_id, worker_id, _utc(now)),
+        )
+        if cursor.rowcount != 1:
+            from packages.pipeline.jobs import LostLeaseError
+
+            raise LostLeaseError(f"live lease not held for job {job_id}")
 
 
 def _reservation_from_row(row: Mapping[str, Any]) -> GenerationReservation:
