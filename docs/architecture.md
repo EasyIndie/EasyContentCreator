@@ -41,11 +41,13 @@ Artifact 不可覆盖，重新生成或编辑会创建新版本。每个版本�
 供应商能力统一为 `generate(request) -> artifact`。发布能力统一为：
 
 - `validate(publication) -> validation_result`
-- `publish(publication, idempotency_key) -> publication_result`
+- `publish(publication) -> publication_result`（幂等键是不可变 Publication 字段）
 - `status(publication_id) -> publication_status`
 - `metrics(publication_id) -> metric_snapshot`
 
 接口请求使用结构化数据，包含能力类型、输入产物引用、模板版本和预算限制。MVP 每类能力只提供一个默认实现和一个确定性 Fake；业务模块不得导入供应商 SDK。发布幂等键在一次 Publication 生命周期内保持不变。
+
+M1 公共 Python 契约位于 `packages/domain`、`packages/providers` 与 `packages/publishers`，使用不可变数据类、递归冻结的 JSON 元数据、字符串枚举、UUID 和 UTC 时间。Source 以内容摘要和结构化引用片段提供证据，Artifact 血缘引用固定来源摘要；ContentProject 使用单调 `revision` 支持 Repository 乐观并发。同步适配器协议不决定网络并发模型，超时与重试由 Worker 统一编排。错误分为可重试外部失败、永久业务失败、适配器契约失败和非法状态转换，详见 [ADR-004](decisions/ADR-004-domain-contracts.md)。
 
 ## 数据、文件与安全
 

@@ -2,7 +2,9 @@
 
 ## 当前状态
 
-当前里程碑为 M0。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check 和 GHCR 镜像发布均已通过；ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked。
+当前主开发里程碑为 M1。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞本地 M1 开发。
+
+M1 从 ECC-015 公共领域与适配器契约开始。契约冻结后，Repository 与迁移、数据库 Job 执行器、确定性 Fake、API/Web 控制台和来源风险规则按依赖图拆分并行。
 
 ## 里程碑
 
