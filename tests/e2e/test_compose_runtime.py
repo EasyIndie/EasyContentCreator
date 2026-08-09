@@ -27,8 +27,12 @@ def test_compose_injects_prefixed_database_and_persistent_artifact_root() -> Non
     assert services["worker"]["environment"]["ECC_DATABASE_URL"] == expected_database_url
     assert "DATABASE_URL" not in services["worker"]["environment"]
     assert services["worker"]["environment"]["ECC_ARTIFACT_ROOT"] == "/data/artifacts"
+    assert services["migrate"]["environment"]["ECC_DATABASE_URL"] == expected_database_url
+    assert services["migrate"]["command"] == ["python", "-m", "migrations"]
     assert "build" in services["api"]
+    assert "build" not in services["migrate"]
     assert "build" not in services["worker"]
+    assert services["migrate"]["image"] == services["api"]["image"]
     assert services["worker"]["image"] == services["api"]["image"]
     assert services["worker"]["command"] == ["python", "-m", "apps.worker.main"]
     assert {
@@ -37,3 +41,7 @@ def test_compose_injects_prefixed_database_and_persistent_artifact_root() -> Non
         "target": "/data/artifacts",
         "volume": {},
     } in services["worker"]["volumes"]
+    assert services["api"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+    assert (
+        services["worker"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+    )

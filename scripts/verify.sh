@@ -6,10 +6,13 @@ cd "$root"
 ./scripts/check-docs.sh
 
 if [[ -f pyproject.toml ]]; then
-  command -v ruff >/dev/null && ruff format --check .
-  command -v ruff >/dev/null && ruff check .
-  command -v mypy >/dev/null && mypy apps packages
-  command -v pytest >/dev/null && pytest
+  source "$root/scripts/python-toolchain.sh"
+  resolve_python_toolchain "$root"
+  ./scripts/test-verify-fail-closed.sh
+  "$ECC_VERIFY_RUFF" format --check .
+  "$ECC_VERIFY_RUFF" check .
+  "$ECC_VERIFY_MYPY" apps packages migrations
+  "$ECC_VERIFY_PYTEST"
 fi
 
 if [[ -f apps/web/package.json ]]; then
