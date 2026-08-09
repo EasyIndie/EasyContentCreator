@@ -91,9 +91,7 @@ class Source:
             raise ValueError("source title, uri and summary are required")
         object.__setattr__(self, "retrieved_at", _utc(self.retrieved_at))
         object.__setattr__(self, "excerpts", tuple(self.excerpts))
-        if len(self.sha256) != 64 or any(
-            char not in "0123456789abcdef" for char in self.sha256
-        ):
+        if len(self.sha256) != 64 or any(char not in "0123456789abcdef" for char in self.sha256):
             raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
 
 

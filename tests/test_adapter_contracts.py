@@ -42,7 +42,5 @@ def test_valid_validation_result_cannot_contain_errors() -> None:
 def test_metric_snapshot_requires_aware_time() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         MetricSnapshot(uuid4(), datetime(2026, 8, 9), {"views": 1})
-    snapshot = MetricSnapshot(
-        uuid4(), datetime(2026, 8, 9, tzinfo=UTC), {"views": 1}
-    )
+    snapshot = MetricSnapshot(uuid4(), datetime(2026, 8, 9, tzinfo=UTC), {"views": 1})
     assert snapshot.values["views"] == 1

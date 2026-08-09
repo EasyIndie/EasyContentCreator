@@ -6,9 +6,7 @@ from packages.domain.models import ContentProject, FailedStage, ProjectStatus
 
 _TRANSITIONS: dict[ProjectStatus, frozenset[ProjectStatus]] = {
     ProjectStatus.DRAFT: frozenset({ProjectStatus.GENERATING}),
-    ProjectStatus.GENERATING: frozenset(
-        {ProjectStatus.REVIEW_REQUIRED, ProjectStatus.FAILED}
-    ),
+    ProjectStatus.GENERATING: frozenset({ProjectStatus.REVIEW_REQUIRED, ProjectStatus.FAILED}),
     ProjectStatus.REVIEW_REQUIRED: frozenset(
         {ProjectStatus.GENERATING, ProjectStatus.APPROVED, ProjectStatus.FAILED}
     ),

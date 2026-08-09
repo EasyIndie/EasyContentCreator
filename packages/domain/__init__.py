@@ -1,4 +1,5 @@
 """Domain model package reserved for M1."""
+
 from packages.domain.errors import (
     AdapterContractError,
     DomainError,
