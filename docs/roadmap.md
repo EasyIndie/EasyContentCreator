@@ -2,9 +2,9 @@
 
 ## 当前状态
 
-当前主开发里程碑为 M1。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞本地 M1 开发。
+当前主开发里程碑为 M1 收口。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞本地 M1 收口。
 
-M1 的领域、PostgreSQL Repository、确定性 Fake、租约 Job、项目审核 API、证据规则和格式门禁已经完成。纵向集成预审发现生成身份与 Job 终态事务缺口，已由 ADR-005 拆为 ECC-025、ECC-026 两个前置任务。当前 Ready 仅为 ECC-025；ECC-026 与 ECC-023 必须按依赖顺序推进。
+ECC-015～026 已完成领域契约、PostgreSQL Repository、确定性 Fake、租约 Job、证据规则、生成身份/原子终态、项目审核、Web 基础控制台及真实 Compose Fake FACT_CARD 纵向切片。ECC-027 已完成准出差距审查；M1 尚需关闭 reject 幽灵 generating、证据审阅、Job 安全错误/恢复控制台及 Compose 自动迁移门禁。只有 ECC-034 复核通过后 M1 才完成。
 
 ## 里程碑
 
@@ -33,19 +33,24 @@ ECC-001 ─┬─ ECC-002 ─ ECC-003 ─┬─ ECC-004 ─┐
 ## M1 依赖与并行关系
 
 ```text
-ECC-015 ─ ECC-016 ─┬─ ECC-017 ─┬─ ECC-019 ─┐
-                   │           ├─ ECC-020 ─┼─ ECC-025 ─ ECC-026 ─ ECC-023
-                   │           │     └─ ECC-021
-                   │           └─ ECC-022 ─┘
-                   ├─ ECC-018 ──────────────┘
-ECC-005 ───────────└─ ECC-024
+ECC-015～022/024 ─ ECC-025 ─ ECC-026 ─ ECC-023 ─ ECC-027
+                                                    ├─ ECC-028 ───────────────┐
+                                                    ├─ ECC-029 ─ ECC-030 ────┤
+                                                    ├─ ECC-031 ─ ECC-032 ────┼─ ECC-034
+                                                    └─ ECC-033 ───────────────┘
 ```
 
-- 已完成：ECC-015～ECC-020、ECC-022、ECC-024；ECC-021 可独立继续 Web 工作。
-- 当前 Ready：ECC-025 生成请求身份与版本契约。
-- ECC-026 状态为 backlog，依赖 ECC-025；ECC-023 状态为 backlog，依赖 ECC-025 与 ECC-026。
-- ECC-023 是唯一跨模块集成任务，只装配冻结接口并验证纵向切片，不再承担架构补洞。
-- M1 准出：Fake FACT_CARD 链路可从生成失败恢复到审核批准，不可变 Artifact 具备 Source/excerpt/摘要血缘，租约与幂等测试通过，Web 可执行人工审核，全量本地与 CI 门禁一致。
+- 已完成：ECC-015～027（ECC-023 为 Fake FACT_CARD 纵向切片，ECC-027 为本次准出规划）。
+- 当前 Ready 且可并行：ECC-028 reject/恢复语义、ECC-029 证据审阅 API、ECC-031 Job/error/recovery API、ECC-033 Compose migration fail-closed。
+- 第二批并行：ECC-030 在 029 后执行，ECC-032 在 031 后执行。
+- ECC-034 等待 ECC-028～033，全量复核通过才将 M1 标记完成。
+- M1 准出：Fake FACT_CARD 可从 retryable、永久证据失败和人工 reject 恢复到新版本并批准；Source/excerpt/摘要血缘可由 Web 审阅；Job 诊断不泄漏 payload/正文/secret；fresh Compose 自动迁移且迁移失败时 API/Worker 不启动；本地、Compose 与 CI 门禁一致。
+
+## M2 规划概览
+
+M2 新任务从 ECC-035 起编号。ECC-034 通过后先创建一个高能力契约任务，冻结短视频步骤 DAG、通用 StepRun/Artifact 终态、9:16 媒体 profile、质检和发布包边界；不得直接把当前 FACT_CARD 专用终态复制到每个步骤。
+
+后续概览按依赖拆分为：通用步骤持久化与调度；来源/选题及文本链；素材与版权；配音、字幕、封面和 FFmpeg 合成；自动质检；审核预览与抖音/视频号发布包；最终真实 PostgreSQL/文件系统/FFmpeg 纵向 E2E 和连续 14 天指标试运行。具体 ECC-035 以后任务在 M1 准出时按冻结接口逐批建立，不在本次一次性预写全部规格。
 
 ## 迭代机制
 
