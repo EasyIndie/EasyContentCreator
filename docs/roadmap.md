@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-当前里程碑为 M0。ECC-001～ECC-007、ECC-009 和 ECC-010 已完成；ECC-008 的本地多 Agent 演练通过，但远程 GitHub CI/CD、staging 和真实回滚因环境尚未配置而 blocked。M0 不在缺少这些证据时标记完成。
+当前里程碑为 M0。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check 和 GHCR 镜像发布均已通过；ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked。
 
 ## 里程碑
 
@@ -25,7 +25,7 @@ ECC-001 ─┬─ ECC-002 ─ ECC-003 ─┬─ ECC-004 ─┐
 
 - 已完成：ECC-001～ECC-007。
 - 已通过：ECC-008 的独立 Worktree、低价模型交付、接口集成和本地质量门禁。
-- 当前阻塞：GitHub remote、Secrets/Environments、Linux staging 与可用 Docker daemon。
+- 当前阻塞：Linux staging 及 SSH、部署目录、备份目录 Environment Secrets。
 - M0 只有在远程 Actions、staging Smoke Test 和真实回滚结果被记录后才能关闭。
 
 ## 迭代机制

@@ -1,5 +1,10 @@
 # 单机部署与回滚运行手册
 
+## GitHub 环境开关
+
+staging 只有在仓库变量 `STAGING_ENABLED=true` 时执行。启用前必须在 `staging` Environment
+配置 `SSH_HOST`、`SSH_USER`、`SSH_PRIVATE_KEY`、`DEPLOY_PATH` 和 `BACKUP_DIR`；未配置服务器时保持关闭，CI 成功后的 staging job 将安全跳过。
+
 ## 主机准备
 
 Linux 主机安装 Docker Engine、Compose 插件、`curl`、`flock`，并检出仅含部署文件的受控仓库目录。创建 `.env`，至少配置 `POSTGRES_PASSWORD`；权限限定给部署用户。GitHub Environment 配置：
