@@ -43,7 +43,8 @@ def database(migrated_database: tuple[Database, tuple[str, ...]]) -> Iterator[Da
     with database.connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            TRUNCATE reviews, jobs, project_current_artifacts, artifact_citations,
+            TRUNCATE generation_requests, reviews, jobs,
+                     project_current_artifacts, artifact_citations,
                      artifact_upstream, artifacts, source_excerpts, sources, projects
             RESTART IDENTITY CASCADE
             """

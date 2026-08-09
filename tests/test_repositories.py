@@ -55,7 +55,7 @@ def test_migration_is_ordered_and_idempotent(
     migrated_database: tuple[Database, tuple[str, ...]],
 ) -> None:
     database, initially_applied = migrated_database
-    assert initially_applied == ("001_initial.sql",)
+    assert initially_applied == ("001_initial.sql", "002_generation_requests.sql")
     assert run_migrations(database) == ()
 
 
