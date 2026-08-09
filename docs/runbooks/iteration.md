@@ -18,3 +18,5 @@
 ## 仓库设置
 
 为 `main` 启用分支保护：禁止直接/强制推送，要求 PR、解决全部讨论及 `PR Fast`、`CI`、`Security`、`Docs Check` 必需检查。公共接口、迁移、安全路径通过 `CODEOWNERS` 指定审核者。配置 `staging` 与 `production` Environment；生产 Environment 必须设置人工审批者。
+
+仓库管理员保留引导和故障恢复所需的 bypass，但正常迭代不得用 bypass 绕过门禁。完整 CI 同时监听 `pull_request`，确保分支保护要求的检查在普通 PR 上确实能够产生。
