@@ -8,9 +8,11 @@ from packages.publishers.contracts import (
     Publisher,
     ValidationResult,
 )
+from packages.publishers.fake import FakePublisher
 
 __all__ = [
     "MetricSnapshot",
+    "FakePublisher",
     "Publication",
     "PublicationResult",
     "PublicationStatus",
