@@ -48,3 +48,11 @@ mypy
 pytest
 cd apps/web && npm run lint && npm test && npm run build
 ```
+
+本机 Docker 支持 Buildx/QEMU 时，可验证 ARM64 与 AMD64 镜像及容器启动：
+
+```bash
+./scripts/verify-multiarch.sh
+```
+
+该脚本逐架构构建 API、Worker、Web，检查镜像架构，并运行 API/Web Smoke Test；完成后清理本次测试创建的容器和镜像。
