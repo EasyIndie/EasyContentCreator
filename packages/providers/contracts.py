@@ -12,6 +12,8 @@ class GenerationRequest:
     project_id: UUID
     capability: str
     output_kind: ArtifactKind
+    output_artifact_id: UUID
+    output_version: int
     inputs: tuple[ArtifactRef, ...]
     template_version: str
     budget_units: int
@@ -20,6 +22,8 @@ class GenerationRequest:
     def __post_init__(self) -> None:
         if not self.capability.strip() or not self.template_version.strip():
             raise ValueError("capability and template_version are required")
+        if self.output_version < 1:
+            raise ValueError("output_version must be positive")
         if self.budget_units < 0:
             raise ValueError("budget_units must not be negative")
         object.__setattr__(self, "inputs", tuple(self.inputs))

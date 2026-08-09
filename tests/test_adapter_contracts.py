@@ -14,6 +14,8 @@ def test_generation_request_freezes_inputs_and_parameters() -> None:
         uuid4(),
         "text.script",
         ArtifactKind.SCRIPT,
+        uuid4(),
+        2,
         (source,),
         "script-v1",
         100,

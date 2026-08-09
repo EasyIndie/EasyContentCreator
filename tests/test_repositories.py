@@ -55,8 +55,55 @@ def test_migration_is_ordered_and_idempotent(
     migrated_database: tuple[Database, tuple[str, ...]],
 ) -> None:
     database, initially_applied = migrated_database
-    assert initially_applied == ("001_initial.sql",)
+    assert initially_applied == ("001_initial.sql", "002_generation_requests.sql")
     assert run_migrations(database) == ()
+
+
+def test_generation_request_migration_preserves_existing_001_data(
+    legacy_database: Database,
+) -> None:
+    project_id = uuid4()
+    job_id = uuid4()
+    artifact_id = uuid4()
+    with legacy_database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO projects
+                (id, title, status, created_at, updated_at, revision)
+            VALUES (%s, 'Legacy project', 'draft', %s, %s, 1)
+            """,
+            (project_id, NOW, NOW),
+        )
+        cursor.execute(
+            """
+            INSERT INTO jobs
+                (id, project_id, kind, status, max_attempts, available_at,
+                 created_at, updated_at)
+            VALUES (%s, %s, 'legacy', 'queued', 3, %s, %s, %s)
+            """,
+            (job_id, project_id, NOW, NOW, NOW),
+        )
+        cursor.execute(
+            """
+            INSERT INTO artifacts
+                (id, version, kind, sha256, project_id, storage_path, created_at,
+                 created_by, adapter)
+            VALUES (%s, 1, 'fact_card', %s, %s, 'legacy/fact-card.json', %s,
+                    'legacy', 'legacy@1')
+            """,
+            (artifact_id, SHA_A, project_id, NOW),
+        )
+
+    assert run_migrations(legacy_database) == ("002_generation_requests.sql",)
+    with legacy_database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT title FROM projects WHERE id = %s", (project_id,))
+        assert cursor.fetchone() == ("Legacy project",)
+        cursor.execute("SELECT kind FROM jobs WHERE id = %s", (job_id,))
+        assert cursor.fetchone() == ("legacy",)
+        cursor.execute("SELECT version FROM artifacts WHERE id = %s", (artifact_id,))
+        assert cursor.fetchone() == (1,)
+        cursor.execute("SELECT COUNT(*) FROM generation_requests")
+        assert cursor.fetchone() == (0,)
 
 
 def test_project_round_trip_and_optimistic_concurrency(database: Database) -> None:

@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from uuid import UUID
 
 from packages.domain import (
     AdapterContractError,
@@ -43,7 +42,9 @@ def _canonical_request(request: GenerationRequest) -> dict[str, object]:
         "budget_units": request.budget_units,
         "capability": request.capability,
         "inputs": [_artifact_ref(item) for item in request.inputs],
+        "output_artifact_id": str(request.output_artifact_id),
         "output_kind": request.output_kind.value,
+        "output_version": request.output_version,
         "parameters": _json_value(request.parameters),
         "project_id": str(request.project_id),
         "template_version": request.template_version,
@@ -89,8 +90,10 @@ class FakeProvider:
 
         content = _canonical_bytes(_canonical_request(request))
         digest = hashlib.sha256(content).hexdigest()
-        artifact_id = UUID(hex=digest[:32])
-        storage_path = f"fake/{request.project_id}/{request.output_kind.value}/{artifact_id}.json"
+        storage_path = (
+            f"fake/{request.project_id}/{request.output_kind.value}/"
+            f"{request.output_artifact_id}-v{request.output_version}.json"
+        )
         target = self._storage_root / storage_path
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
@@ -101,8 +104,8 @@ class FakeProvider:
 
         artifact = Artifact(
             ref=ArtifactRef(
-                artifact_id=artifact_id,
-                version=1,
+                artifact_id=request.output_artifact_id,
+                version=request.output_version,
                 kind=request.output_kind,
                 sha256=digest,
             ),
