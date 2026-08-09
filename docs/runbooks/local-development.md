@@ -37,7 +37,8 @@ npm install
 npm run dev
 ```
 
-如 API 地址不是 `http://localhost:8000`，通过 `VITE_API_BASE_URL` 覆盖。
+开发服务器默认将 `/api` 代理到 `http://127.0.0.1:8000`；需要连接其他 API 时通过
+`VITE_API_BASE_URL` 覆盖。容器中的 Nginx 使用相同 `/api` 路径反向代理 API，避免跨域配置分叉。
 
 ## 验证
 

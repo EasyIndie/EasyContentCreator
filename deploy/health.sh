@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-url="${HEALTH_URL:-http://127.0.0.1:8000/health}"
+url="${HEALTH_URL:-http://127.0.0.1:8000/health/ready}"
 attempts="${HEALTH_ATTEMPTS:-30}"
 for ((i=1; i<=attempts; i++)); do
   curl --fail --silent --show-error "$url" >/dev/null && exit 0

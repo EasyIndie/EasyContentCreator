@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-当前里程碑为 M0。ECC-001～ECC-007 已完成协作规范、产品与架构基线、可运行工程骨架、自动化质量门禁和部署框架。当前进入 ECC-008，通过独立 Worktree 的纵向小改动演练交接与集成。
+当前里程碑为 M0。ECC-001～ECC-007、ECC-009 和 ECC-010 已完成；ECC-008 的本地多 Agent 演练通过，但远程 GitHub CI/CD、staging 和真实回滚因环境尚未配置而 blocked。M0 不在缺少这些证据时标记完成。
 
 ## 里程碑
 
@@ -24,8 +24,9 @@ ECC-001 ─┬─ ECC-002 ─ ECC-003 ─┬─ ECC-004 ─┐
 ```
 
 - 已完成：ECC-001～ECC-007。
-- 当前 Ready：ECC-008。
-- M0 只有在本地协作演练通过，且远程 GitHub 与 staging 验证结果被如实记录后才能关闭。
+- 已通过：ECC-008 的独立 Worktree、低价模型交付、接口集成和本地质量门禁。
+- 当前阻塞：GitHub remote、Secrets/Environments、Linux staging 与可用 Docker daemon。
+- M0 只有在远程 Actions、staging Smoke Test 和真实回滚结果被记录后才能关闭。
 
 ## 迭代机制
 

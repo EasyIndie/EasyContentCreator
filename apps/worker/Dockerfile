@@ -6,4 +6,4 @@ COPY apps apps
 COPY packages packages
 COPY migrations migrations
 RUN pip install --no-cache-dir .
-CMD ["python", "-m", "apps.worker"]
+CMD ["python", "-m", "apps.worker.main"]

@@ -11,7 +11,9 @@ export ECC_IMAGE="$IMAGE_REF"
 export ECC_WEB_IMAGE="$WEB_IMAGE_REF"
 ./deploy/backup.sh
 docker compose pull api worker
-docker compose run --rm api python -m alembic upgrade head
+if [[ -f alembic.ini ]]; then
+  docker compose run --rm api python -m alembic upgrade head
+fi
 docker compose up -d --remove-orphans
 ./deploy/health.sh
 printf 'app=%s\nweb=%s\n' "$IMAGE_REF" "$WEB_IMAGE_REF" > .deployed-image
