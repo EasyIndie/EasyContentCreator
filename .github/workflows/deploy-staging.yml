@@ -11,19 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: {ref: '${{ github.event.workflow_run.head_sha }}'}
+      - name: Normalize container registry path
+        id: registry
+        run: 'echo "prefix=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"'
       - uses: docker/login-action@v4
         with: {registry: ghcr.io, username: '${{ github.actor }}', password: '${{ secrets.GITHUB_TOKEN }}'}
       - uses: docker/build-push-action@v7
         id: api
-        with: {context: ., file: apps/api/Dockerfile, push: true, tags: 'ghcr.io/${{ github.repository }}/app:${{ github.event.workflow_run.head_sha }}'}
+        with: {context: ., file: apps/api/Dockerfile, push: true, tags: '${{ steps.registry.outputs.prefix }}/app:${{ github.event.workflow_run.head_sha }}'}
       - uses: docker/build-push-action@v7
         id: web
-        with: {context: ., file: apps/web/Dockerfile, push: true, tags: 'ghcr.io/${{ github.repository }}/web:${{ github.event.workflow_run.head_sha }}'}
+        with: {context: ., file: apps/web/Dockerfile, push: true, tags: '${{ steps.registry.outputs.prefix }}/web:${{ github.event.workflow_run.head_sha }}'}
       - name: Deploy immutable image over SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE_REF: ghcr.io/${{ github.repository }}/app@${{ steps.api.outputs.digest }}
-          WEB_IMAGE_REF: ghcr.io/${{ github.repository }}/web@${{ steps.web.outputs.digest }}
+          IMAGE_REF: ${{ steps.registry.outputs.prefix }}/app@${{ steps.api.outputs.digest }}
+          WEB_IMAGE_REF: ${{ steps.registry.outputs.prefix }}/web@${{ steps.web.outputs.digest }}
           BACKUP_DIR: '${{ secrets.BACKUP_DIR }}'
         with:
           host: '${{ secrets.SSH_HOST }}'
