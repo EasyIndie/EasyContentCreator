@@ -81,6 +81,17 @@ Google Chrome 应用，Linux/CI 默认查找 `google-chrome`、`google-chrome-st
 `chromium-browser`。Chrome sandbox 默认启用；只有运行环境明确不支持 sandbox 时才设置
 `ECC_BROWSER_NO_SANDBOX=1`，该开关仅用于浏览器测试进程，不得作为普通本地或 CI 默认值。
 
+## 本地素材安全导入
+
+M2 外部素材只能通过 `LocalAssetImporter` 从配置的 import root 导入 artifact root。调用方必须提供
+规范 POSIX 相对源路径、reservation 决定的相对目标路径、白名单 MIME 和导入前计算的 SHA-256；
+不得把绝对路径、用户原始文件名或文件 URI 写入 Artifact metadata、日志或 rights manifest。
+
+导入先按文件签名核对 MIME，在目标目录写临时文件、关闭并校验摘要后原子 rename。同一目标与摘要
+可作为崩溃恢复复用，目标已存在但摘要不同必须失败关闭。来源或目标链上的符号链接、路径穿越、NUL
+与 MIME 伪装必须拒绝。每项素材同时建立 `asset_rights_v1` manifest，记录 HTTPS/URN 来源、许可证明、
+commercial/modification/distribution scope 和可选到期时间；unknown、expired 或 scope 不完整均阻塞 QC。
+
 本机 Docker 支持 Buildx/QEMU 时，可验证 ARM64 与 AMD64 镜像及容器启动：
 
 ```bash

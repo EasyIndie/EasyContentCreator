@@ -1,5 +1,15 @@
 """Domain model package reserved for M1."""
 
+from packages.domain.assets import (
+    AssetManifest,
+    AssetManifestEntry,
+    AssetRights,
+    AssetRightsIssue,
+    AssetSource,
+    LicenseType,
+    RightsIssueCode,
+    RightsScope,
+)
 from packages.domain.errors import (
     AdapterContractError,
     DomainError,
@@ -50,6 +60,11 @@ from packages.domain.reviews import Review, ReviewDecision
 from packages.domain.state import transition_project
 
 __all__ = [
+    "AssetManifest",
+    "AssetManifestEntry",
+    "AssetRights",
+    "AssetRightsIssue",
+    "AssetSource",
     "AdapterContractError",
     "Artifact",
     "ArtifactKind",
@@ -64,6 +79,7 @@ __all__ = [
     "InvalidStateTransition",
     "ImmutableConflictError",
     "LogicalArtifactRef",
+    "LicenseType",
     "PermanentError",
     "PipelineRun",
     "PipelineRunStatus",
@@ -74,6 +90,8 @@ __all__ = [
     "ReviewDecision",
     "ReviewRepository",
     "RetryableError",
+    "RightsIssueCode",
+    "RightsScope",
     "Source",
     "SourceCitation",
     "SourceExcerpt",
