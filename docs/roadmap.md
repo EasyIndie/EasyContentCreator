@@ -2,9 +2,9 @@
 
 ## 当前状态
 
-当前主开发里程碑为 M1 收口。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞本地 M1 收口。
+M1 已于 `ECC-034` 本地准出审计通过，当前主开发里程碑切换为 M2 契约规划。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞 M2 本地开发。
 
-ECC-015～026 已完成领域契约、PostgreSQL Repository、确定性 Fake、租约 Job、证据规则、生成身份/原子终态、项目审核、Web 基础控制台及真实 Compose Fake FACT_CARD 纵向切片。ECC-027 已完成准出差距审查；M1 尚需关闭 reject 幽灵 generating、证据审阅、Job 安全错误/恢复控制台及 Compose 自动迁移门禁。只有 ECC-034 复核通过后 M1 才完成。
+ECC-015～033 已完成领域契约、PostgreSQL Repository、确定性 Fake、租约 Job、证据规则、生成身份/原子终态、审核拒绝恢复、证据与 Job 安全 API/Web 控制台及 Compose 自动迁移。ECC-034 在 `main@0013fc2` 以真实 PostgreSQL、fresh Compose volumes 和生产 Web 构建完成恢复、审核、追溯、错误安全与失败关闭矩阵，准出证据见 [M1 复核](iterations/M1-exit-audit.md)。
 
 ## 里程碑
 
@@ -40,15 +40,13 @@ ECC-015～022/024 ─ ECC-025 ─ ECC-026 ─ ECC-023 ─ ECC-027
                                                     └─ ECC-033 ───────────────┘
 ```
 
-- 已完成：ECC-015～027（ECC-023 为 Fake FACT_CARD 纵向切片，ECC-027 为本次准出规划）。
-- 当前 Ready 且可并行：ECC-028 reject/恢复语义、ECC-029 证据审阅 API、ECC-031 Job/error/recovery API、ECC-033 Compose migration fail-closed。
-- 第二批并行：ECC-030 在 029 后执行，ECC-032 在 031 后执行。
-- ECC-034 等待 ECC-028～033，全量复核通过才将 M1 标记完成。
-- M1 准出：Fake FACT_CARD 可从 retryable、永久证据失败和人工 reject 恢复到新版本并批准；Source/excerpt/摘要血缘可由 Web 审阅；Job 诊断不泄漏 payload/正文/secret；fresh Compose 自动迁移且迁移失败时 API/Worker 不启动；本地、Compose 与 CI 门禁一致。
+- 已完成：ECC-015～034。
+- M1 准出已通过：Fake FACT_CARD 可从 retryable、永久证据失败和人工 reject 恢复到新版本并批准；Source/excerpt/摘要血缘可由 Web 审阅；Job 诊断不泄漏 payload/正文/secret；fresh Compose 自动迁移且迁移失败时 API/Worker 不启动；本地统一验证与 Compose 门禁一致。
+- 未遗留 M1 功能 blocker。远程 Linux staging/回滚仍属于 M0 的 ECC-008 外部环境 blocker，不改变 M1 本地产品能力结论。
 
 ## M2 规划概览
 
-M2 新任务从 ECC-035 起编号。ECC-034 通过后先创建一个高能力契约任务，冻结短视频步骤 DAG、通用 StepRun/Artifact 终态、9:16 媒体 profile、质检和发布包边界；不得直接把当前 FACT_CARD 专用终态复制到每个步骤。
+M2 新任务从 ECC-035 起编号。下一项工作是创建并执行高能力契约任务 ECC-035，冻结短视频步骤 DAG、通用 StepRun/Artifact 终态、9:16 媒体 profile、质检和发布包边界；不得直接把当前 FACT_CARD 专用终态复制到每个步骤。
 
 后续概览按依赖拆分为：通用步骤持久化与调度；来源/选题及文本链；素材与版权；配音、字幕、封面和 FFmpeg 合成；自动质检；审核预览与抖音/视频号发布包；最终真实 PostgreSQL/文件系统/FFmpeg 纵向 E2E 和连续 14 天指标试运行。具体 ECC-035 以后任务在 M1 准出时按冻结接口逐批建立，不在本次一次性预写全部规格。
 
