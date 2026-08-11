@@ -365,10 +365,35 @@ def test_step_retry_permanent_failure_invalidation_and_rerun_are_explicit() -> N
         occurred_at=NOW + timedelta(seconds=1),
         error_class="Provider.PermanentError",
     )
-    replacement = pending(version=2, run_spec=original.spec)
+    replacement_candidate = pending(version=2, run_spec=original.spec)
+    replacement = replace(
+        replacement_candidate,
+        output_reservations=(
+            replace(
+                replacement_candidate.output_reservations[0],
+                artifact_id=original.output_reservations[0].artifact_id,
+            ),
+        ),
+    )
     validate_step_rerun(failed, replacement)
+    stale_candidate = pending(version=1, run_spec=original.spec)
+    stale = replace(
+        stale_candidate,
+        output_reservations=(
+            replace(
+                stale_candidate.output_reservations[0],
+                artifact_id=original.output_reservations[0].artifact_id,
+            ),
+        ),
+    )
     with pytest.raises(InvalidStateTransition, match="versions"):
-        validate_step_rerun(failed, pending(version=1, run_spec=original.spec))
+        validate_step_rerun(failed, stale)
+    changed_id = replace(
+        replacement,
+        output_reservations=(replace(replacement.output_reservations[0], artifact_id=uuid4()),),
+    )
+    with pytest.raises(InvalidStateTransition, match="Artifact ID"):
+        validate_step_rerun(failed, changed_id)
     output = logical(
         "topic_brief",
         ArtifactKind.TOPIC_BRIEF,
@@ -448,6 +473,12 @@ def test_fanout_child_rerun_only_advances_target_item() -> None:
     assert child.spec.preserved_output_refs == tuple(
         sorted(preserved, key=lambda item: item.logical_key)
     )
+    changed_id = replace(
+        child,
+        output_reservations=(replace(child.output_reservations[0], artifact_id=uuid4()),),
+    )
+    with pytest.raises(InvalidStateTransition, match="Artifact ID"):
+        validate_fanout_item_rerun(succeeded, changed_id)
 
 
 def artifact_for(reservation: StepOutputReservation) -> Artifact:

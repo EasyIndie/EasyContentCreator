@@ -417,16 +417,17 @@ def validate_step_rerun(previous: StepRun, replacement: StepRun) -> None:
         raise InvalidStateTransition(
             "rerun must target the same pipeline node and output identities"
         )
-    previous_versions = {
-        (item.output.slot_name, item.output.item_key): item.version
-        for item in previous.output_reservations
+    previous_reservations = {
+        (item.output.slot_name, item.output.item_key): item for item in previous.output_reservations
     }
-    if any(
-        reservation.version
-        <= previous_versions[(reservation.output.slot_name, reservation.output.item_key)]
-        for reservation in replacement.output_reservations
-    ):
-        raise InvalidStateTransition("rerun output versions must increase monotonically")
+    for reservation in replacement.output_reservations:
+        previous_reservation = previous_reservations[
+            (reservation.output.slot_name, reservation.output.item_key)
+        ]
+        if reservation.artifact_id != previous_reservation.artifact_id:
+            raise InvalidStateTransition("rerun must preserve logical Artifact ID")
+        if reservation.version <= previous_reservation.version:
+            raise InvalidStateTransition("rerun output versions must increase monotonically")
 
 
 def validate_fanout_item_rerun(previous: StepRun, replacement: StepRun) -> None:
@@ -460,6 +461,8 @@ def validate_fanout_item_rerun(previous: StepRun, replacement: StepRun) -> None:
         previous_reservation = previous_reservations[identity]
         if reservation.output != previous_reservation.output:
             raise InvalidStateTransition("fanout item rerun must preserve item output identity")
+        if reservation.artifact_id != previous_reservation.artifact_id:
+            raise InvalidStateTransition("fanout item rerun must preserve logical Artifact ID")
         if reservation.version <= previous_reservation.version:
             raise InvalidStateTransition("target fanout item version must increase")
 
