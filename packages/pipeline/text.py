@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import stat
 from collections.abc import Callable, Mapping
 from datetime import datetime
@@ -59,6 +60,8 @@ _TEMPLATE_VERSIONS = {
     StepKind.TOPIC_BRIEF: "topic_brief_v1",
     StepKind.SCRIPT: "script_v1",
 }
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
 
 
 class TextStepProducer:
@@ -183,67 +186,135 @@ def _required_string(parameters: Mapping[str, object], name: str) -> str:
 
 def _write_deterministic(storage_root: Path, relative_path: Path, content: bytes) -> None:
     storage_root.mkdir(parents=True, exist_ok=True)
-    root = storage_root.resolve()
-    current = storage_root
-    for part in relative_path.parent.parts:
-        current /= part
-        current.mkdir(exist_ok=True)
-        if (
-            current.is_symlink()
-            or not current.is_dir()
-            or not current.resolve().is_relative_to(root)
-        ):
-            raise TextEvidenceError("reserved text directory is unsafe")
-    target = storage_root / relative_path
-    parent = target.parent.resolve()
-    if target.is_symlink():
-        raise TextEvidenceError("reserved text path must not be a symbolic link")
-    if target.exists():
-        _verify_existing(target, content)
-        return
-
-    temporary = target.with_name(f".{target.name}.tmp")
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as error:
-        raise TextEvidenceError("reserved text path has an interrupted temporary file") from error
+        root_fd = os.open(storage_root, _DIRECTORY_FLAGS)
+    except OSError as error:
+        raise TextEvidenceError("text storage root is unsafe") from error
+    if relative_path.is_absolute() or any(part in {"", ".", ".."} for part in relative_path.parts):
+        os.close(root_fd)
+        raise TextEvidenceError("reserved text path is unsafe")
+    parent_fd: int | None = None
+    temporary_name = f".{relative_path.name}.attempt-{secrets.token_hex(16)}.tmp"
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
+        parent_fd = _walk_storage_parent(root_fd, relative_path.parts[:-1], create=True)
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
         try:
-            os.link(temporary, target)
-        except FileExistsError:
-            _verify_existing(target, content)
-        directory = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
+            remaining = memoryview(content)
+            while remaining:
+                written = os.write(temporary_fd, remaining)
+                remaining = remaining[written:]
+            os.fsync(temporary_fd)
+            temporary_stat = os.fstat(temporary_fd)
         finally:
-            os.close(directory)
+            os.close(temporary_fd)
+
+        current_parent_fd = _walk_storage_parent(root_fd, relative_path.parts[:-1], create=False)
+        try:
+            if not _same_directory(parent_fd, current_parent_fd):
+                raise TextEvidenceError("reserved text directory changed during publish")
+            published = False
+            try:
+                os.link(
+                    temporary_name,
+                    relative_path.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=current_parent_fd,
+                    follow_symlinks=False,
+                )
+                published = True
+            except FileExistsError:
+                pass
+            if published:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+                os.fsync(current_parent_fd)
+            final_stat = _verify_existing(current_parent_fd, relative_path.name, content)
+            if published and (final_stat.st_dev, final_stat.st_ino) != (
+                temporary_stat.st_dev,
+                temporary_stat.st_ino,
+            ):
+                raise TextEvidenceError("reserved text path changed during publish")
+
+            try:
+                final_parent_fd = _walk_storage_parent(
+                    root_fd, relative_path.parts[:-1], create=False
+                )
+            except OSError as error:
+                if published:
+                    os.unlink(relative_path.name, dir_fd=current_parent_fd)
+                raise TextEvidenceError("reserved text directory changed during publish") from error
+            try:
+                if not _same_directory(current_parent_fd, final_parent_fd):
+                    if published:
+                        os.unlink(relative_path.name, dir_fd=current_parent_fd)
+                    raise TextEvidenceError("reserved text directory changed during publish")
+            finally:
+                os.close(final_parent_fd)
+        finally:
+            os.close(current_parent_fd)
+    except OSError as error:
+        raise TextEvidenceError("reserved text path cannot be published safely") from error
     finally:
-        temporary.unlink(missing_ok=True)
+        if parent_fd is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            os.close(parent_fd)
+        os.close(root_fd)
 
 
-def _verify_existing(target: Path, content: bytes) -> None:
+def _walk_storage_parent(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+    current_fd = os.dup(root_fd)
     try:
-        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
-    except (FileNotFoundError, OSError) as error:
-        raise TextEvidenceError("reserved text path cannot be read safely") from error
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _same_directory(left_fd: int, right_fd: int) -> bool:
+    left = os.fstat(left_fd)
+    right = os.fstat(right_fd)
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _verify_existing(parent_fd: int, name: str, content: bytes) -> os.stat_result:
+    descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent_fd)
     try:
-        details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode):
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise TextEvidenceError("reserved text path is not a regular file")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 64 * 1024):
             chunks.append(chunk)
         existing = b"".join(chunks)
+        after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    if target.is_symlink():
-        raise TextEvidenceError("reserved text path is not a regular file")
+    if (before.st_size, before.st_mtime_ns, before.st_ctime_ns, before.st_nlink) != (
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        after.st_nlink,
+    ):
+        raise TextEvidenceError("reserved text path changed during verification")
     if hashlib.sha256(existing).digest() != hashlib.sha256(content).digest() or existing != content:
         raise TextEvidenceError("reserved text path contains different bytes")
+    return after
 
 
 def _reject_duplicate_key(pairs: list[tuple[str, object]]) -> dict[str, object]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -311,11 +312,15 @@ def test_atomic_publish_reuses_same_bytes_and_rejects_conflicts_and_residue(
         producer(fact, tmp_path)(request)
 
     target.unlink()
-    temporary = target.with_name(f".{target.name}.tmp")
-    temporary.write_bytes(b"interrupted")
-    with pytest.raises(TextEvidenceError, match="interrupted temporary"):
-        producer(fact, tmp_path)(request)
-    assert temporary.read_bytes() == b"interrupted"
+    partial = target.with_name(f".{target.name}.attempt-crashed.tmp")
+    partial.write_bytes(b"interrupted")
+    complete = target.with_name(f".{target.name}.attempt-complete.tmp")
+    complete.write_bytes(artifact.ref.sha256.encode())
+    recovered = producer(fact, tmp_path)(request).artifacts[0].artifact
+    assert recovered == artifact
+    assert target.read_bytes()
+    assert partial.read_bytes() == b"interrupted"
+    assert complete.read_bytes() == artifact.ref.sha256.encode()
 
 
 def test_publish_rejects_symbolic_link_storage_components(tmp_path: Path) -> None:
@@ -325,6 +330,32 @@ def test_publish_rejects_symbolic_link_storage_components(tmp_path: Path) -> Non
     root = tmp_path / "root"
     root.mkdir()
     (root / "text").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(TextEvidenceError, match="directory is unsafe"):
+    with pytest.raises(TextEvidenceError, match="cannot be published safely"):
         producer(fact, root)(request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID))
+    assert tuple(outside.iterdir()) == ()
+
+
+def test_parent_swap_during_publish_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fact = input_artifact()
+    request = request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID)
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_link = os.link
+    swapped = False
+
+    def swapping_link(source: str | bytes, destination: str | bytes, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            parent = root / f"text/{PROJECT_ID}/topic_brief"
+            parent.rename(parent.with_name("orphaned-topic-brief"))
+            parent.symlink_to(outside, target_is_directory=True)
+        real_link(source, destination, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "link", swapping_link)
+    with pytest.raises(TextEvidenceError, match="directory changed"):
+        producer(fact, root)(request)
     assert tuple(outside.iterdir()) == ()
