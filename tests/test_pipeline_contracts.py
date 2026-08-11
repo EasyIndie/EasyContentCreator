@@ -24,6 +24,7 @@ from packages.domain import (
     retry_step_run,
     transition_pipeline_run,
     transition_step_run,
+    validate_fanout_item_rerun,
     validate_step_rerun,
 )
 from packages.pipeline import (
@@ -134,7 +135,7 @@ def test_definition_rejects_global_logical_key_collisions() -> None:
         (StepInputDefinition("fact", ArtifactKind.FACT_CARD, None, "fact"),),
         (ArtifactSlotDefinition("topic", ArtifactKind.TOPIC_BRIEF, "fact"),),
     )
-    with pytest.raises(ValueError, match="globally unique"):
+    with pytest.raises(ValueError, match="namespaces"):
         PipelineDefinition(
             "custom",
             "v1",
@@ -149,7 +150,7 @@ def test_definition_rejects_global_logical_key_collisions() -> None:
         (StepInputDefinition("topic", ArtifactKind.TOPIC_BRIEF, StepKind.TOPIC_BRIEF, "topic"),),
         (ArtifactSlotDefinition("script", ArtifactKind.SCRIPT, "fact"),),
     )
-    with pytest.raises(ValueError, match="globally unique"):
+    with pytest.raises(ValueError, match="namespaces"):
         PipelineDefinition(
             "custom",
             "v1",
@@ -210,6 +211,10 @@ def test_definition_validates_spec_binding_kind_and_complete_single_outputs() ->
         definition.validate_step_spec(
             spec(outputs=(StepOutputSpec("bad", ArtifactKind.MEDIA, "bad"),))
         )
+    with pytest.raises(ValueError, match="single slot"):
+        definition.validate_step_spec(
+            spec(inputs=(BoundArtifactRef("fact_card", logical("wrong_fact_card")),))
+        )
 
 
 def test_dynamic_fanout_has_stable_shot_and_channel_identities() -> None:
@@ -222,6 +227,75 @@ def test_dynamic_fanout_has_stable_shot_and_channel_identities() -> None:
     assert channel_slot.logical_key_for("wechat_channels") == "channel/wechat_channels/package"
     with pytest.raises(ValueError, match="not allowed"):
         channel_slot.logical_key_for("youtube")
+
+
+def test_fanout_input_rejects_rogue_or_unstable_item_identity() -> None:
+    source = ArtifactSlotDefinition(
+        "source_asset",
+        ArtifactKind.MEDIA,
+        "asset/{item_key}",
+        OutputCardinality.FANOUT,
+        ("shot_001", "shot_002"),
+    )
+    step = StepDefinition(
+        StepKind.COVER,
+        "v1",
+        (StepInputDefinition("asset", ArtifactKind.MEDIA, None, "source_asset"),),
+        (ArtifactSlotDefinition("cover", ArtifactKind.COVER, "cover"),),
+    )
+    definition = PipelineDefinition("custom", "v1", "profile_v1", (source,), (step,))
+    valid = spec(
+        inputs=(BoundArtifactRef("asset", logical("asset/shot_001", ArtifactKind.MEDIA)),),
+        outputs=(StepOutputSpec("cover", ArtifactKind.COVER, "cover"),),
+        step_kind=StepKind.COVER,
+        profile_version="profile_v1",
+    )
+    definition.validate_step_spec(valid)
+    with pytest.raises(ValueError, match="not allowed"):
+        definition.validate_step_spec(
+            replace(
+                valid,
+                input_refs=(BoundArtifactRef("asset", logical("asset/rogue", ArtifactKind.MEDIA)),),
+            )
+        )
+    with pytest.raises(ValueError, match="unstable item identity"):
+        source.item_key_from("asset/shot_001/extra")
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (
+            ArtifactSlotDefinition("one", ArtifactKind.MEDIA, "asset/shot_001"),
+            ArtifactSlotDefinition(
+                "many", ArtifactKind.MEDIA, "asset/{item_key}", OutputCardinality.FANOUT
+            ),
+        ),
+        (
+            ArtifactSlotDefinition(
+                "many", ArtifactKind.MEDIA, "asset/{item_key}", OutputCardinality.FANOUT
+            ),
+            ArtifactSlotDefinition(
+                "thumbs",
+                ArtifactKind.COVER,
+                "asset/{item_key}/thumbnail",
+                OutputCardinality.FANOUT,
+            ),
+        ),
+    ],
+)
+def test_definition_rejects_static_or_prefix_overlapping_namespaces(
+    left: ArtifactSlotDefinition, right: ArtifactSlotDefinition
+) -> None:
+    step = StepDefinition(StepKind.TOPIC_BRIEF, "v1", (), (left, right))
+    with pytest.raises(ValueError, match="namespaces"):
+        PipelineDefinition(
+            "custom",
+            "v1",
+            "profile_v1",
+            (ArtifactSlotDefinition("fact", ArtifactKind.FACT_CARD, "fact"),),
+            (step,),
+        )
 
 
 def test_multi_output_reservations_are_frozen_and_exact() -> None:
@@ -317,6 +391,65 @@ def test_step_retry_permanent_failure_invalidation_and_rerun_are_explicit() -> N
     )
 
 
+def test_fanout_child_rerun_only_advances_target_item() -> None:
+    outputs = (
+        StepOutputSpec("asset_manifest", ArtifactKind.ASSET_MANIFEST, "asset_manifest"),
+        StepOutputSpec("shot_asset", ArtifactKind.MEDIA, "asset/shot_001", "shot_001"),
+        StepOutputSpec("shot_asset", ArtifactKind.MEDIA, "asset/shot_002", "shot_002"),
+    )
+    storyboard_input = BoundArtifactRef(
+        "storyboard", logical("storyboard", ArtifactKind.STORYBOARD)
+    )
+    original = pending(
+        run_spec=spec(
+            inputs=(storyboard_input,),
+            outputs=outputs,
+            step_kind=StepKind.ASSET_MANIFEST,
+        )
+    )
+    original_refs = tuple(
+        logical(
+            reservation.output.logical_key,
+            reservation.output.kind,
+            artifact_id=reservation.artifact_id,
+            version=reservation.version,
+            sha=chr(98 + index) * 64,
+        )
+        for index, reservation in enumerate(original.output_reservations)
+    )
+    succeeded = transition_step_run(
+        original,
+        StepRunStatus.SUCCEEDED,
+        occurred_at=NOW + timedelta(seconds=1),
+        output_refs=original_refs,
+    )
+    target = original.output_reservations[1]
+    preserved = tuple(ref for ref in original_refs if ref.logical_key != target.output.logical_key)
+    child_spec = spec(
+        inputs=original.spec.input_refs,
+        outputs=(target.output,),
+        step_kind=StepKind.ASSET_MANIFEST,
+        rerun_of_step_run_id=original.id,
+        preserved_output_refs=preserved,
+    )
+    child = StepRun(
+        uuid4(),
+        child_spec,
+        "shot-001-rerun",
+        canonical_step_request_hash(child_spec),
+        uuid4(),
+        (StepOutputReservation(target.output, target.artifact_id, target.version + 1),),
+        StepRunStatus.PENDING,
+        NOW + timedelta(seconds=2),
+    )
+    short_video_v1_definition().validate_step_spec(child_spec)
+    validate_fanout_item_rerun(succeeded, child)
+    assert child.output_reservations[0].version == 2
+    assert child.spec.preserved_output_refs == tuple(
+        sorted(preserved, key=lambda item: item.logical_key)
+    )
+
+
 def artifact_for(reservation: StepOutputReservation) -> Artifact:
     return Artifact(
         ArtifactRef(
@@ -345,6 +478,9 @@ def test_production_result_must_exactly_match_request_reservations() -> None:
         StepProductionResult(
             (produced, ProducedArtifact(extra_reservation, artifact_for(extra_reservation)))
         ).validate_against_request(request)
+    wrong_project = replace(produced, artifact=replace(produced.artifact, project_id=uuid4()))
+    with pytest.raises(ValueError, match="project_id"):
+        StepProductionResult((wrong_project,)).validate_against_request(request)
 
 
 def test_pure_producer_request_is_separate_from_live_lease_terminal_context() -> None:

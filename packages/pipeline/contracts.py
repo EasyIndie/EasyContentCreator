@@ -51,8 +51,10 @@ class ArtifactSlotDefinition:
             if self.allowed_item_keys:
                 raise ValueError("single output must not declare item keys")
         else:
-            if template.count("{item_key}") != 1:
-                raise ValueError("fanout logical key template must contain one {item_key}")
+            if template.count("{item_key}") != 1 or "{item_key}" not in template.split("/"):
+                raise ValueError(
+                    "fanout logical key template must contain one complete {item_key} segment"
+                )
             validate_logical_key(template.replace("{item_key}", "item"))
             items = tuple(self.allowed_item_keys)
             if len(set(items)) != len(items):
@@ -72,6 +74,22 @@ class ArtifactSlotDefinition:
         if self.allowed_item_keys and item_key not in self.allowed_item_keys:
             raise ValueError(f"item_key {item_key} is not allowed for {self.name}")
         return self.logical_key_template.replace("{item_key}", item_key)
+
+    def item_key_from(self, logical_key: str) -> str | None:
+        validate_logical_key(logical_key)
+        if self.cardinality is OutputCardinality.SINGLE:
+            if logical_key != self.logical_key_template:
+                raise ValueError(f"logical key does not match single slot {self.name}")
+            return None
+        prefix, suffix = self.logical_key_template.split("{item_key}")
+        if not logical_key.startswith(prefix) or not logical_key.endswith(suffix):
+            raise ValueError(f"logical key does not match fanout slot {self.name}")
+        end = len(logical_key) - len(suffix) if suffix else len(logical_key)
+        item_key = logical_key[len(prefix) : end]
+        if "/" in item_key:
+            raise ValueError(f"logical key has an unstable item identity for {self.name}")
+        self.logical_key_for(item_key)
+        return item_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,10 +149,11 @@ class PipelineDefinition:
             raise ValueError("pipeline has duplicate external input names")
         if len({step.kind for step in steps}) != len(steps):
             raise ValueError("pipeline has duplicate step kinds")
-        templates = [slot.logical_key_template for slot in external_inputs]
-        templates.extend(slot.logical_key_template for step in steps for slot in step.outputs)
-        if len(set(templates)) != len(templates):
-            raise ValueError("pipeline logical output templates must be globally unique")
+        slots = [*external_inputs, *(slot for step in steps for slot in step.outputs)]
+        for index, left in enumerate(slots):
+            for right in slots[index + 1 :]:
+                if _logical_namespaces_overlap(left, right):
+                    raise ValueError("pipeline logical output namespaces must not overlap")
         object.__setattr__(self, "external_inputs", external_inputs)
         object.__setattr__(self, "steps", steps)
         _validate_bindings_and_acyclic(self)
@@ -181,10 +200,13 @@ class PipelineDefinition:
         if {item.binding_name for item in spec.input_refs} != set(bindings):
             raise ValueError("StepRunSpec inputs do not exactly match step bindings")
         for item in spec.input_refs:
-            if item.artifact.kind is not bindings[item.binding_name].kind:
+            binding = bindings[item.binding_name]
+            if item.artifact.kind is not binding.kind:
                 raise ValueError(
                     f"binding {item.binding_name} Artifact kind does not match definition"
                 )
+            source = self._source_slot(binding)
+            source.item_key_from(item.artifact.logical_key)
         slots = {item.name: item for item in step.outputs}
         for output in spec.outputs:
             slot = slots.get(output.slot_name)
@@ -198,8 +220,22 @@ class PipelineDefinition:
         actual_singles = {
             output.slot_name for output in spec.outputs if output.slot_name in singles
         }
-        if actual_singles != singles:
+        if spec.rerun_of_step_run_id is None and actual_singles != singles:
             raise ValueError("StepRunSpec must reserve every single output")
+        if spec.rerun_of_step_run_id is not None and any(
+            slots[output.slot_name].cardinality is not OutputCardinality.FANOUT
+            for output in spec.outputs
+        ):
+            raise ValueError("fanout child rerun may reserve only fanout outputs")
+
+    def _source_slot(self, binding: StepInputDefinition) -> ArtifactSlotDefinition:
+        if binding.source_step is None:
+            return next(slot for slot in self.external_inputs if slot.name == binding.source_slot)
+        return next(
+            slot
+            for slot in self.step(binding.source_step).outputs
+            if slot.name == binding.source_slot
+        )
 
 
 def _validate_bindings_and_acyclic(definition: PipelineDefinition) -> None:
@@ -223,6 +259,30 @@ def _validate_bindings_and_acyclic(definition: PipelineDefinition) -> None:
             if source.kind is not binding.kind:
                 raise ValueError(f"step {step.kind} input kind does not match source")
     definition.topological_steps()
+
+
+def _logical_namespaces_overlap(
+    left: ArtifactSlotDefinition, right: ArtifactSlotDefinition
+) -> bool:
+    """Return true when two templates can produce equal or prefix-related keys."""
+
+    left_parts = left.logical_key_template.split("/")
+    right_parts = right.logical_key_template.split("/")
+    for left_part, right_part in zip(left_parts, right_parts, strict=False):
+        left_dynamic = left_part == "{item_key}"
+        right_dynamic = right_part == "{item_key}"
+        if not left_dynamic and not right_dynamic and left_part != right_part:
+            return False
+        if left_dynamic and left.allowed_item_keys and not right_dynamic:
+            if right_part not in left.allowed_item_keys:
+                return False
+        if right_dynamic and right.allowed_item_keys and not left_dynamic:
+            if left_part not in right.allowed_item_keys:
+                return False
+        if left_dynamic and right_dynamic and left.allowed_item_keys and right.allowed_item_keys:
+            if not set(left.allowed_item_keys) & set(right.allowed_item_keys):
+                return False
+    return True
 
 
 def _single(name: str, kind: ArtifactKind, key: str | None = None) -> ArtifactSlotDefinition:
@@ -472,6 +532,19 @@ def canonical_step_request_hash(spec: StepRunSpec) -> str:
         "project_id": str(spec.project_id),
         "step_kind": spec.step_kind.value,
         "step_version": spec.step_version,
+        "rerun_of_step_run_id": (
+            str(spec.rerun_of_step_run_id) if spec.rerun_of_step_run_id else None
+        ),
+        "preserved_output_refs": [
+            {
+                "artifact_id": str(ref.artifact_id),
+                "kind": ref.kind.value,
+                "logical_key": ref.logical_key,
+                "sha256": ref.sha256,
+                "version": ref.version,
+            }
+            for ref in spec.preserved_output_refs
+        ],
     }
     content = json.dumps(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True
@@ -530,6 +603,8 @@ class StepProductionResult:
         }
         if actual != expected or len(actual) != len(self.artifacts):
             raise ValueError("production result must exactly satisfy every request reservation")
+        if any(item.artifact.project_id != request.spec.project_id for item in self.artifacts):
+            raise ValueError("produced Artifact project_id does not match the request")
 
 
 @dataclass(frozen=True, slots=True)

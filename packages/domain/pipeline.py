@@ -198,6 +198,8 @@ class StepRunSpec:
     outputs: tuple[StepOutputSpec, ...]
     parameters: Mapping[str, FrozenJsonValue] = field(default_factory=dict)
     profile_version: str = "short_video_9x16_v1"
+    rerun_of_step_run_id: UUID | None = None
+    preserved_output_refs: tuple[LogicalArtifactRef, ...] = ()
 
     def __post_init__(self) -> None:
         validate_version(self.step_version, "step_version")
@@ -227,8 +229,16 @@ class StepRunSpec:
             raise ValueError("outputs must have unique slot and item identities")
         if len({item.logical_key for item in outputs}) != len(outputs):
             raise ValueError("outputs must have unique logical keys")
+        preserved = tuple(sorted(self.preserved_output_refs, key=lambda item: item.logical_key))
+        if len({item.logical_key for item in preserved}) != len(preserved):
+            raise ValueError("preserved_output_refs must have unique logical keys")
+        if {item.logical_key for item in preserved} & {item.logical_key for item in outputs}:
+            raise ValueError("preserved outputs must not overlap rerun outputs")
+        if self.rerun_of_step_run_id is None and preserved:
+            raise ValueError("preserved_output_refs require rerun_of_step_run_id")
         object.__setattr__(self, "input_refs", inputs)
         object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "preserved_output_refs", preserved)
         object.__setattr__(self, "parameters", freeze_json_mapping(self.parameters))
 
 
@@ -417,3 +427,48 @@ def validate_step_rerun(previous: StepRun, replacement: StepRun) -> None:
         for reservation in replacement.output_reservations
     ):
         raise InvalidStateTransition("rerun output versions must increase monotonically")
+
+
+def validate_fanout_item_rerun(previous: StepRun, replacement: StepRun) -> None:
+    """Validate a child rerun that replaces only selected fanout items."""
+
+    if previous.status is not StepRunStatus.SUCCEEDED:
+        raise InvalidStateTransition("fanout item rerun requires a succeeded parent StepRun")
+    if replacement.status is not StepRunStatus.PENDING:
+        raise InvalidStateTransition("fanout item rerun replacement must be pending")
+    if replacement.spec.rerun_of_step_run_id != previous.id:
+        raise InvalidStateTransition("fanout item rerun must reference its parent StepRun")
+    if replacement.spec.input_refs != previous.spec.input_refs:
+        raise InvalidStateTransition("fanout item rerun must preserve the exact input snapshot")
+    if previous.id == replacement.id or previous.job_id == replacement.job_id:
+        raise InvalidStateTransition("fanout item rerun requires new StepRun and Job identities")
+    if previous.idempotency_key == replacement.idempotency_key:
+        raise InvalidStateTransition("fanout item rerun requires a new idempotency key")
+
+    previous_reservations = {
+        (item.output.slot_name, item.output.item_key): item for item in previous.output_reservations
+    }
+    targets = {
+        (item.output.slot_name, item.output.item_key): item
+        for item in replacement.output_reservations
+    }
+    if not targets or any(item_key is None for _, item_key in targets):
+        raise InvalidStateTransition("fanout item rerun may target only named fanout items")
+    if not set(targets) <= set(previous_reservations):
+        raise InvalidStateTransition("fanout item rerun contains an unknown item identity")
+    for identity, reservation in targets.items():
+        previous_reservation = previous_reservations[identity]
+        if reservation.output != previous_reservation.output:
+            raise InvalidStateTransition("fanout item rerun must preserve item output identity")
+        if reservation.version <= previous_reservation.version:
+            raise InvalidStateTransition("target fanout item version must increase")
+
+    targeted_keys = {item.output.logical_key for item in targets.values()}
+    expected_preserved = tuple(
+        sorted(
+            (ref for ref in previous.output_refs if ref.logical_key not in targeted_keys),
+            key=lambda item: item.logical_key,
+        )
+    )
+    if replacement.spec.preserved_output_refs != expected_preserved:
+        raise InvalidStateTransition("fanout item rerun must pin every unaffected output ref")

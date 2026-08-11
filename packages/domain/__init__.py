@@ -33,6 +33,7 @@ from packages.domain.pipeline import (
     retry_step_run,
     transition_pipeline_run,
     transition_step_run,
+    validate_fanout_item_rerun,
     validate_step_rerun,
 )
 from packages.domain.repositories import (
@@ -89,4 +90,5 @@ __all__ = [
     "transition_project",
     "transition_step_run",
     "validate_step_rerun",
+    "validate_fanout_item_rerun",
 ]
