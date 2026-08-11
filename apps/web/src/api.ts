@@ -56,6 +56,43 @@ export type GenerationResponse = {
   status: JobStatus
 }
 
+export type ArtifactCitation = {
+  source_id: string
+  excerpt_id: string
+  source_sha256: string
+}
+
+export type ArtifactEvidence = {
+  artifact_id: string
+  version: number
+  kind: string
+  sha256: string
+  project_id: string
+  created_at: string
+  created_by: string
+  adapter: string
+  metadata: {
+    capability?: string
+    template_version?: string
+    parameters?: { source_ids?: string[] }
+  }
+  upstream: ArtifactRef[]
+  citations: ArtifactCitation[]
+}
+
+export type SourceExcerpt = { id: string; text: string; locator: string | null }
+
+export type EvidenceSource = {
+  id: string
+  kind: string
+  title: string
+  uri: string
+  retrieved_at: string
+  sha256: string
+  summary: string
+  excerpts: SourceExcerpt[]
+}
+
 type ApiErrorBody = { detail: { code: string; message: string } }
 
 export class ApiError extends Error {
@@ -95,6 +132,68 @@ function artifactRef(value: unknown): value is ArtifactRef {
     typeof value.version === 'number' &&
     string(value.kind) &&
     string(value.sha256)
+  )
+}
+
+function artifactCitation(value: unknown): value is ArtifactCitation {
+  return (
+    object(value) &&
+    string(value.source_id) &&
+    string(value.excerpt_id) &&
+    string(value.source_sha256)
+  )
+}
+
+function artifactMetadata(value: unknown): value is ArtifactEvidence['metadata'] {
+  if (!object(value)) return false
+  if (value.capability !== undefined && !string(value.capability)) return false
+  if (value.template_version !== undefined && !string(value.template_version)) return false
+  if (value.parameters === undefined) return true
+  if (!object(value.parameters)) return false
+  return (
+    value.parameters.source_ids === undefined ||
+    (Array.isArray(value.parameters.source_ids) && value.parameters.source_ids.every(string))
+  )
+}
+
+function artifactEvidence(value: unknown): value is ArtifactEvidence {
+  if (!object(value)) return false
+  const candidate: Record<string, unknown> = value
+  return (
+    string(candidate.project_id) &&
+    string(candidate.created_at) &&
+    string(candidate.created_by) &&
+    string(candidate.adapter) &&
+    artifactMetadata(candidate.metadata) &&
+    Array.isArray(candidate.upstream) &&
+    candidate.upstream.every(artifactRef) &&
+    Array.isArray(candidate.citations) &&
+    candidate.citations.every(artifactCitation) &&
+    artifactRef(candidate)
+  )
+}
+
+function sourceExcerpt(value: unknown): value is SourceExcerpt {
+  return (
+    object(value) &&
+    string(value.id) &&
+    string(value.text) &&
+    (value.locator === null || string(value.locator))
+  )
+}
+
+function evidenceSource(value: unknown): value is EvidenceSource {
+  return (
+    object(value) &&
+    string(value.id) &&
+    string(value.kind) &&
+    string(value.title) &&
+    string(value.uri) &&
+    string(value.retrieved_at) &&
+    string(value.sha256) &&
+    string(value.summary) &&
+    Array.isArray(value.excerpts) &&
+    value.excerpts.every(sourceExcerpt)
   )
 }
 
@@ -195,6 +294,24 @@ export function listProjects(signal?: AbortSignal): Promise<Project[]> {
 
 export function getProject(projectId: string, signal?: AbortSignal): Promise<Project> {
   return request(`/projects/${projectId}`, project, { signal })
+}
+
+export function getArtifactEvidence(
+  projectId: string,
+  artifactId: string,
+  version: number,
+  signal?: AbortSignal,
+): Promise<ArtifactEvidence> {
+  const owner = encodeURIComponent(projectId)
+  return request(
+    `/artifacts/${artifactId}/versions/${version}?project_id=${owner}`,
+    artifactEvidence,
+    { signal },
+  )
+}
+
+export function getEvidenceSource(sourceId: string, signal?: AbortSignal): Promise<EvidenceSource> {
+  return request(`/sources/${sourceId}`, evidenceSource, { signal })
 }
 
 export function createProject(title: string): Promise<Project> {
