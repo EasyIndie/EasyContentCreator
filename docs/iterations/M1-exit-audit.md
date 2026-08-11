@@ -16,27 +16,31 @@
 | 租约与崩溃恢复 | 真实 PostgreSQL 覆盖过期租约、文件先写/终态前失败与单 Artifact | 通过 |
 | 证据追溯 | Compose Smoke 读取 Source/excerpt/SHA、Artifact metadata/citation；响应无 storage path | 通过 |
 | Job 错误安全 | Job API 状态与 recoverable 由后端给出；响应/OpenAPI 无 payload、lease、异常正文或 secret | 通过 |
-| Web 可操作 | 22 项组件测试覆盖证据、Job、恢复和审核组合；Vite 生产构建及宿主发布端口页面通过 | 通过 |
+| Web 可操作 | system Chrome 加载生产 JS，经同源 `/api` proxy 选择项目、审阅证据/Job、reject、提交新 key v2 recovery 并 approve；22 项组件测试与 Vite build 补充覆盖 | 通过 |
 | fresh/idempotent migration | 隔离 Compose fresh volume 应用全部 migration，重复运行无副作用 | 通过 |
 | migration fail-closed | 坏 migration 与数据库不可达均非零；API/Worker 不启动；日志不含密码 | 通过 |
 | 一致质量门禁 | Ruff format/lint、strict Mypy、Python/Web 测试、生产构建、Compose config、docs/diff | 通过 |
 
 ## 执行证据
 
-1. `TEST_DATABASE_URL=postgresql://ecc:***@127.0.0.1:55436/ecc_test POSTGRES_PASSWORD=validation-only ./scripts/verify.sh`
-   - 新增 Smoke 前基线耗时 97.37 秒；收敛后的最终门禁耗时 72.30 秒。
+1. `TEST_DATABASE_URL=postgresql://ecc:***@127.0.0.1:55437/ecc_test POSTGRES_PASSWORD=validation-only ./scripts/verify.sh`
+   - 新增 Smoke 前基线耗时 97.37 秒；真实 Chrome 加固后的最终门禁耗时 70.26 秒。
    - Python 快速集：129 passed；Compose gate：3 passed；Web：22 passed；生产构建通过。
    - 唯一 warning：第三方 Starlette/httpx 弃用提示，不影响当前行为。
 2. `.venv/bin/python -m pytest -q tests/e2e/test_m1_exit_smoke.py`
-   - 最终独立运行：1 passed，28.27 秒。
+   - system Chrome/CDP 与字节 SHA 加固后独立运行：1 passed，31.35 秒。
    - 使用唯一 Compose project、fresh PostgreSQL/Artifact volumes、任务专属镜像并执行 `down -v --rmi local`。
+   - Chrome performance entries 证明页面请求使用 `http://localhost:<port>/api/...`；未使用 mocked fetch。
+   - 同一非零 Web 发布端口以 `localhost` 与 `127.0.0.1` 访问均返回 200。
 3. `./scripts/check-docs.sh` 与 `git diff --check`：通过。
 
 ## 失败与处置
 
-新增 Smoke 首次运行时，所有 API/Worker、证据、reject/v2/approve 断言已通过，但 Docker Desktop
-发布的 Web 端口通过 `127.0.0.1` 请求返回 400。该失败没有重跑忽略：将宿主访问固定为
-`localhost`，保留真实发布端口检查，随后独立运行通过。未发现产品实现缺陷，未修改 Web/Compose。
+新增 shell Smoke 首次运行时，所有 API/Worker、证据、reject/v2/approve 断言已通过，但 Web 请求
+返回 400；当时没有记录解析后的发布端口，不能证明是 `127.0.0.1` 边界或产品缺陷。浏览器加固后
+先断言发布端口非零，再在相同端口分别请求 `localhost` 与 `127.0.0.1`，两者均为 200；system
+Chrome 通过 `localhost` 加载 JS 并完成全套 UI 操作。旧 400 未复现，准确归类为证据不足的测试
+harness 失败，不再对 Host 边界作无依据推断。
 
 ## 遗留风险
 
@@ -45,6 +49,7 @@
 - M0 ECC-008 的远程 Linux staging Smoke 与真实回滚仍因服务器 Secrets 未配置而 blocked；本次结论
   仅声明 M1 本地通用流水线准出，不将其误报为生产部署就绪。
 - Starlette/httpx 弃用 warning 应在依赖升级任务中处理，但不阻塞 M1。
+- Compose 浏览器门禁依赖 system Chrome/Chromium；本地与 CI 缺少浏览器时会失败关闭，不自动下载。
 
 ## M2 剩余 Backlog
 

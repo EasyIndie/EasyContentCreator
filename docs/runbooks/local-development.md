@@ -75,6 +75,11 @@ POSTGRES_PASSWORD=validation-only ./scripts/verify.sh
 立即失败，不会静默跳过 Python 检查。验证包含隔离 Compose 的 fresh/repeat/fail-closed/health
 测试，并自动删除其专属容器、网络和卷。
 
+M1 浏览器准出测试还要求系统已安装 Chrome/Chromium，可通过 `CHROME_BIN` 指定可执行文件。测试
+使用系统浏览器的 DevTools Protocol，不下载浏览器；找不到浏览器时失败关闭。macOS 默认查找
+Google Chrome 应用，Linux/CI 默认查找 `google-chrome`、`google-chrome-stable`、`chromium` 或
+`chromium-browser`。
+
 本机 Docker 支持 Buildx/QEMU 时，可验证 ARM64 与 AMD64 镜像及容器启动：
 
 ```bash
