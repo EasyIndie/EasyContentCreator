@@ -16,12 +16,19 @@
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-python -c "from apps.common.config import get_settings; from apps.common.database import Database; from migrations import run_migrations; print(run_migrations(Database(get_settings().database_url)))"
+python -m migrations
 uvicorn apps.api.main:app --reload
 ```
 
-API/Worker 当前不会在进程入口自动执行迁移；首次启动或拉取新增 migration 后，必须先运行上述
-仓库既有 `run_migrations` 入口。重复执行是幂等的。
+原生启动 API/Worker 前运行 `python -m migrations`；重复执行是幂等的。使用 Compose 时，
+`migrate` 一次性服务会在 PostgreSQL healthy 后自动执行，只有退出码为 0 时 API/Worker 才启动：
+
+```bash
+POSTGRES_PASSWORD=local-only docker compose up --build
+```
+
+迁移失败时不要绕过依赖条件单独启动 API/Worker；先查看 `docker compose logs migrate`，修复后重新
+执行。迁移日志只记录 migration 文件名，不打印数据库连接串或密码。
 
 另开终端启动 Worker：
 
@@ -61,11 +68,12 @@ npm run dev
 ## 验证
 
 ```bash
-ruff check .
-mypy
-pytest
-cd apps/web && npm run lint && npm test && npm run build
+POSTGRES_PASSWORD=validation-only ./scripts/verify.sh
 ```
+
+统一验证要求完整 `.venv`（`python/ruff/mypy/pytest`）或 PATH 中的等价完整工具链；任何工具缺失都
+立即失败，不会静默跳过 Python 检查。验证包含隔离 Compose 的 fresh/repeat/fail-closed/health
+测试，并自动删除其专属容器、网络和卷。
 
 本机 Docker 支持 Buildx/QEMU 时，可验证 ARM64 与 AMD64 镜像及容器启动：
 

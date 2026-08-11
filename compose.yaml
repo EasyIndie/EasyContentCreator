@@ -12,6 +12,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  migrate:
+    image: ${ECC_IMAGE:-easy-content-creator:dev}
+    environment:
+      ECC_DATABASE_URL: postgresql://${POSTGRES_USER:-ecc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecc}
+    depends_on:
+      postgres: {condition: service_healthy}
+    command: ["python", "-m", "migrations"]
+    restart: "no"
   api:
     image: ${ECC_IMAGE:-easy-content-creator:dev}
     build:
@@ -20,7 +28,7 @@ services:
     environment:
       ECC_DATABASE_URL: postgresql://${POSTGRES_USER:-ecc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecc}
     depends_on:
-      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
     healthcheck:
       test: [CMD, "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"]
       interval: 5s
@@ -35,7 +43,7 @@ services:
       ECC_ARTIFACT_ROOT: /data/artifacts
       ECC_DATABASE_URL: postgresql://${POSTGRES_USER:-ecc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecc}
     depends_on:
-      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
     volumes: [artifacts:/data/artifacts]
     command: ["python", "-m", "apps.worker.main"]
     restart: unless-stopped
