@@ -3,16 +3,20 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import {
   ApiError,
   createProject,
+  generateProject,
   getHealth,
   getProject,
   getVersion,
   listProjects,
+  listProjectJobs,
+  Job,
   Project,
   ReviewDecision,
   reviewProject,
 } from './api'
 
 type ListState = 'loading' | 'empty' | 'error' | 'content'
+type JobsState = 'idle' | 'loading' | 'empty' | 'error' | 'content'
 
 function aborted(reason: unknown): boolean {
   return reason instanceof DOMException && reason.name === 'AbortError'
@@ -27,6 +31,8 @@ export function App() {
   const [selected, setSelected] = useState<Project | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [jobsState, setJobsState] = useState<JobsState>('idle')
   const [title, setTitle] = useState('')
   const [creating, setCreating] = useState(false)
   const [createFeedback, setCreateFeedback] = useState<string | null>(null)
@@ -34,8 +40,15 @@ export function App() {
   const [note, setNote] = useState('')
   const [reviewing, setReviewing] = useState(false)
   const [reviewFeedback, setReviewFeedback] = useState<string | null>(null)
+  const [idempotencyKey, setIdempotencyKey] = useState('')
+  const [sourceIds, setSourceIds] = useState('')
+  const [templateVersion, setTemplateVersion] = useState('fact-card-v1')
+  const [budgetUnits, setBudgetUnits] = useState('1000')
+  const [recovering, setRecovering] = useState(false)
+  const [recoveryFeedback, setRecoveryFeedback] = useState<string | null>(null)
   const createFeedbackRef = useRef<HTMLParagraphElement>(null)
   const reviewFeedbackRef = useRef<HTMLParagraphElement>(null)
+  const recoveryFeedbackRef = useRef<HTMLParagraphElement>(null)
 
   const replaceProject = (project: Project) => {
     setProjects((current) => {
@@ -50,6 +63,17 @@ export function App() {
     setDetailError(false)
     try {
       replaceProject(await getProject(projectId, signal))
+      setJobsState('loading')
+      try {
+        const items = await listProjectJobs(projectId, signal)
+        setJobs(items)
+        setJobsState(items.length === 0 ? 'empty' : 'content')
+      } catch (reason) {
+        if (!aborted(reason)) {
+          setJobs([])
+          setJobsState('error')
+        }
+      }
     } catch (reason) {
       if (!aborted(reason)) setDetailError(true)
     } finally {
@@ -88,6 +112,10 @@ export function App() {
     if (reviewFeedback) reviewFeedbackRef.current?.focus()
   }, [reviewFeedback])
 
+  useEffect(() => {
+    if (recoveryFeedback) recoveryFeedbackRef.current?.focus()
+  }, [recoveryFeedback])
+
   const submitProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (creating) return
@@ -96,6 +124,8 @@ export function App() {
     try {
       const created = await createProject(title)
       replaceProject(created)
+      setJobs([])
+      setJobsState('empty')
       setListState('content')
       setTitle('')
       setCreateFeedback('项目已创建。')
@@ -125,6 +155,33 @@ export function App() {
       }
     } finally {
       setReviewing(false)
+    }
+  }
+
+  const submitRecovery = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selected || recovering) return
+    setRecovering(true)
+    setRecoveryFeedback(null)
+    const parsedSourceIds = sourceIds.split(/[\s,]+/).filter(Boolean)
+    try {
+      const result = await generateProject(selected.id, idempotencyKey, {
+        source_ids: parsedSourceIds,
+        template_version: templateVersion,
+        budget_units: Number(budgetUnits),
+      })
+      setRecoveryFeedback(`恢复任务已提交：${result.job_id} · ${result.status}`)
+      await loadDetail(selected.id)
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409) {
+        setRecoveryFeedback('幂等键已用于不同请求，请更换 Idempotency-Key。')
+      } else if (reason instanceof ApiError && reason.status === 422) {
+        setRecoveryFeedback('恢复参数无效，请检查 Source IDs、模板版本和预算。')
+      } else {
+        setRecoveryFeedback('恢复提交失败，服务暂不可用。')
+      }
+    } finally {
+      setRecovering(false)
     }
   }
 
@@ -206,6 +263,72 @@ export function App() {
                 ))}
               </ul>
             )}
+
+            <section aria-labelledby="jobs-heading" className="nested-section">
+              <h4 id="jobs-heading">任务与错误</h4>
+              {jobsState === 'idle' && <p>选择项目后加载任务。</p>}
+              {jobsState === 'loading' && <p role="status">正在加载任务…</p>}
+              {jobsState === 'empty' && <p>暂无任务。</p>}
+              {jobsState === 'error' && <p role="alert">任务列表 unavailable，请稍后重试。</p>}
+              {jobsState === 'content' && (
+                <ol className="job-list">
+                  {jobs.map((job) => (
+                    <li key={job.id}>
+                      <strong>{job.kind}</strong> · {job.status} · attempt {job.attempt}/
+                      {job.max_attempts}
+                      <br />
+                      <span>更新时间：{job.updated_at}</span>
+                      {job.error_class && <span> · 错误分类：{job.error_class}</span>}
+                      {job.recoverable && (
+                        <form onSubmit={submitRecovery} aria-label={`恢复任务 ${job.id}`}>
+                          <label htmlFor={`idempotency-key-${job.id}`}>Idempotency-Key</label>
+                          <input
+                            id={`idempotency-key-${job.id}`}
+                            value={idempotencyKey}
+                            onChange={(event) => setIdempotencyKey(event.target.value)}
+                            required
+                            maxLength={200}
+                          />
+                          <label htmlFor={`source-ids-${job.id}`}>Source IDs</label>
+                          <textarea
+                            id={`source-ids-${job.id}`}
+                            value={sourceIds}
+                            onChange={(event) => setSourceIds(event.target.value)}
+                            required
+                            placeholder="多个 UUID 用逗号或换行分隔"
+                          />
+                          <label htmlFor={`template-version-${job.id}`}>模板版本</label>
+                          <input
+                            id={`template-version-${job.id}`}
+                            value={templateVersion}
+                            onChange={(event) => setTemplateVersion(event.target.value)}
+                            required
+                          />
+                          <label htmlFor={`budget-units-${job.id}`}>预算单位</label>
+                          <input
+                            id={`budget-units-${job.id}`}
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={budgetUnits}
+                            onChange={(event) => setBudgetUnits(event.target.value)}
+                            required
+                          />
+                          <button type="submit" disabled={recovering}>
+                            {recovering ? '恢复提交中…' : '提交恢复'}
+                          </button>
+                        </form>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {recoveryFeedback && (
+                <p ref={recoveryFeedbackRef} role="alert" tabIndex={-1}>
+                  {recoveryFeedback}
+                </p>
+              )}
+            </section>
 
             {selected.status === 'review_required' && (
               <form onSubmit={submitReview} aria-labelledby="review-heading">
