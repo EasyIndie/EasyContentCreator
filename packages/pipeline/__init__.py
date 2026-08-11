@@ -59,6 +59,13 @@ from packages.pipeline.persistence import (
     StepRunConflict,
     StepRunRepository,
 )
+from packages.pipeline.text import (
+    InputArtifactResolver,
+    TextBudgetExceeded,
+    TextEvidenceError,
+    TextStepProducer,
+    validate_citation_closure,
+)
 
 __all__ = [
     "ArtifactSlotDefinition",
@@ -80,6 +87,10 @@ __all__ = [
     "JobStore",
     "JobView",
     "LostLeaseError",
+    "InputArtifactResolver",
+    "TextBudgetExceeded",
+    "TextEvidenceError",
+    "TextStepProducer",
     "LeasedStepContext",
     "LeasedStepTerminalHandler",
     "OutputCardinality",
@@ -110,4 +121,5 @@ __all__ = [
     "short_video_v1_definition",
     "validate_short_video_v1",
     "validate_artifact_evidence",
+    "validate_citation_closure",
 ]
