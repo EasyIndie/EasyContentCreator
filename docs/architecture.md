@@ -34,6 +34,8 @@ draft → generating → review_required → approved → publishing → publish
 
 Artifact 不可覆盖，重新生成或编辑会创建新版本。每个版本记录类型、存储位置、内容摘要、上游产物、来源、模板/模型参数和创建者；项目仅移动当前版本指针。详细边界见 [ADR-002](decisions/ADR-002-artifacts-adapters.md)。
 
+M2 以版本化 `PipelineDefinition`/`PipelineRun` 和 `StepRun` 承载多步骤 DAG。StepRun 钉住精确输入 ArtifactRef、规范 fingerprint、输出 `logical_key` 与预留版本；Job 只承载租约执行，StepRun 不复制 queued/running 状态。项目只在 run 启动与完整 DAG+QC 建立审核快照时转换，单个步骤成功不得提前进入 `review_required`。多镜头和渠道产物以 logical key 区分，不能只依赖 kind 级 current pointer。完整契约见 [ADR-007](decisions/ADR-007-short-video-pipeline-contracts.md)。
+
 ## 流水线与接口
 
 步骤声明输入和输出 Artifact 类型，只读取显式输入，不访问其他步骤的内部目录。上游当前版本改变后，系统标记所有依赖它的下游当前版本失效；重跑只创建受影响步骤的新 Job 和 Artifact。
@@ -51,9 +53,13 @@ M1 公共 Python 契约位于 `packages/domain`、`packages/providers` 与 `pack
 
 生成请求在项目范围以 Idempotency-Key 和规范请求摘要持久化，并在同一事务中预留项目/kind 的逻辑 Artifact 单调版本、转换项目及 enqueue。生成 handler 拥有终态事务：成功时同时提交不可变 Artifact、证据、current pointer、项目状态和 Job succeeded，永久失败时同时提交审计产物、项目失败和 Job failed；RetryableError 仅重排原 Job。具体身份、citations 和崩溃恢复边界见 [ADR-005](decisions/ADR-005-generation-identity-transactions.md)。
 
+M2 通用步骤终态替代上述 FACT_CARD 专用终态：持有 live lease 的 handler 在单一事务中提交全部 outputs、血缘、logical pointers、StepRun 与 Job；唯一约束 reconciler 只为依赖已满足的节点建立下游 Job。上游变化标记依赖旧 ref 的步骤、ReviewBundle 与 approval 失效；retryable 与崩溃恢复复用原 reservation，显式 rerun 才预留下一个版本。
+
 ## 数据、文件与安全
 
 PostgreSQL 保存实体、状态、任务租约、血缘、审核和发布记录；本地文件系统保存媒体内容，数据库仅保存受控根目录内的相对路径与摘要。密钥只从环境变量或 GitHub Environment Secrets 注入，不进入数据库正文、日志、样例或产物。
+
+媒体步骤在最终路径同一文件系统的 attempt 目录写入，关闭、摘要后原子 rename，再提交数据库终态；允许可识别的孤儿文件，不允许数据库引用半文件。FFmpeg/ffprobe 固定版本、仅 argv 与受控模板、禁用网络输入并限制超时/资源/stderr；拒绝绝对路径、穿越和 symlink escape。
 
 Job 由数据库租约保证同一时刻只被一个 Worker 执行；Worker 定期续租，租约过期后才可被重新领取。有限次数重试使用退避策略，永久错误直接失败；发布重试前必须先查询平台状态或依赖相同幂等键。
 
@@ -67,6 +73,8 @@ M2 纵向链路为：
 ```
 
 事实性陈述必须关联至少一个可信 Source。质检覆盖媒体完整性、分辨率、时长、响度、黑帧、静音、字幕时序与越界、引用缺失和敏感风险。无官方发布权限时只生成发布包。
+
+M2 使用 `short_video_9x16_v1`：1080×1920、H.264/AAC、30 fps、15～180 秒，字幕/封面安全区和响度阈值均版本化。QCReport 以稳定 blocker/warning/info issue 表达媒体、证据和授权检查；不可变 ReviewBundle 钉住全部 refs、project revision 与 bundle hash。Douyin/WeChat Channels 发布包只消费已批准且未失效的 bundle，导出 manifest、视频、封面、字幕、文案、citations、licenses 和 checksums。没有官方权限时项目保持 approved，只记录人工交付，不以浏览器模拟或伪造 published。
 
 ## 交付架构
 

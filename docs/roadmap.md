@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-M1 已于 `ECC-034` 本地准出审计通过，当前主开发里程碑切换为 M2 契约规划。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞 M2 本地开发。
+M1 已于 `ECC-034` 本地准出审计通过；M2 契约规划 `ECC-035` 已完成，当前 Ready 为 `ECC-036`。协作底座、本地多 Agent 演练、GitHub CI/Security/Docs Check、多架构镜像验证和 GHCR 发布均已通过；M0 的 ECC-008 仅剩 Linux staging Smoke Test 与真实回滚因服务器尚未配置而 blocked，不阻塞 M2 本地开发。
 
 ECC-015～033 已完成领域契约、PostgreSQL Repository、确定性 Fake、租约 Job、证据规则、生成身份/原子终态、审核拒绝恢复、证据与 Job 安全 API/Web 控制台及 Compose 自动迁移。ECC-034 在 `main@0013fc2` 以真实 PostgreSQL、fresh Compose volumes 和生产 Web 构建完成恢复、审核、追溯、错误安全与失败关闭矩阵，准出证据见 [M1 复核](iterations/M1-exit-audit.md)。
 
@@ -46,9 +46,26 @@ ECC-015～022/024 ─ ECC-025 ─ ECC-026 ─ ECC-023 ─ ECC-027
 
 ## M2 规划概览
 
-M2 新任务从 ECC-035 起编号。下一项工作是创建并执行高能力契约任务 ECC-035，冻结短视频步骤 DAG、通用 StepRun/Artifact 终态、9:16 媒体 profile、质检和发布包边界；不得直接把当前 FACT_CARD 专用终态复制到每个步骤。
+ECC-035 已以 [ADR-007](decisions/ADR-007-short-video-pipeline-contracts.md) 冻结 `short_video_v1` DAG、PipelineRun/StepRun/logical key、`short_video_9x16_v1`、文件/FFmpeg、QC/ReviewBundle 和 export-only 渠道包边界。不得把 FACT_CARD 专用终态复制到每个步骤。
 
-后续概览按依赖拆分为：通用步骤持久化与调度；来源/选题及文本链；素材与版权；配音、字幕、封面和 FFmpeg 合成；自动质检；审核预览与抖音/视频号发布包；最终真实 PostgreSQL/文件系统/FFmpeg 纵向 E2E 和连续 14 天指标试运行。具体 ECC-035 以后任务在 M1 准出时按冻结接口逐批建立，不在本次一次性预写全部规格。
+```text
+ECC-035 → ECC-036 ─┬→ ECC-037 → ECC-038 ───────────────────────────────┐
+                   ├→ ECC-039 → ECC-040 ─┬→ ECC-041 ─┐                │
+                   └──────────────────────┼→ ECC-042 → ECC-043 ─┐     │
+                                          └→ ECC-044 ───────────┼→ ECC-045
+                                      ECC-041 + 043 + 044 + 045 → ECC-046
+ECC-038 + ECC-039～046 → ECC-047 → ECC-048 → ECC-049 ───────────┐
+                                      ECC-048 + ECC-046 → ECC-050 ├→ ECC-053
+                                                  ECC-049+050 → ECC-051 ┘
+                               ECC-038 + ECC-047 + ECC-050 → ECC-052 ─┘
+ECC-053 → ECC-054 → ECC-055（连续 14 天准出）
+```
+
+- 已完成：ECC-035。
+- Ready：ECC-036，冻结公共领域接口后才开放实现。
+- ECC-036 后可并行：ECC-037 持久化、ECC-039 文本链、ECC-041 素材授权边界；后续配音/字幕、封面与媒体实现按各自冻结输入并行。
+- 关键路径：ECC-036→037→038→047→048→050/051→053→054→055。
+- ECC-055 是每日工作量很小但日历时间不可压缩的 14 天观测门禁；只验证导出时只能宣布“发布包链路准出”。
 
 ## 迭代机制
 
