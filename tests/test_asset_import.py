@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -210,6 +211,50 @@ def test_import_rejects_damaged_and_polyglot_media(roots: tuple[Path, Path]) -> 
             )
 
 
+def test_decode_errors_in_a_partially_decodable_video_fail_closed(
+    roots: tuple[Path, Path],
+) -> None:
+    import_root, artifact_root = roots
+    importer = _importer(roots)
+    valid = import_root / "valid.mp4"
+    generated = subprocess.run(
+        (
+            str(importer._decoder._ffmpeg),
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=10:duration=1",
+            "-c:v",
+            "mpeg4",
+            "-f",
+            "mp4",
+            str(valid),
+        ),
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    assert generated.returncode == 0
+    damaged = bytearray(valid.read_bytes())
+    mdat = damaged.find(b"mdat")
+    assert mdat >= 0
+    damaged[mdat + 20 : mdat + 28] = b"\xff" * 8
+    broken = import_root / "broken.mp4"
+    broken.write_bytes(damaged)
+
+    with pytest.raises(UnsupportedAssetMediaType, match="decoder rejected"):
+        importer.import_asset(
+            source_path="broken.mp4",
+            destination_path="asset/broken.mp4",
+            expected_mime_type="video/mp4",
+            expected_sha256=_digest(damaged),
+        )
+    assert not (artifact_root / "asset/broken.mp4").exists()
+
+
 def test_existing_hard_link_is_never_accepted_as_immutable_target(
     roots: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -315,6 +360,45 @@ def test_competing_hard_link_after_publish_is_detected(
             expected_sha256=_digest(JPEG),
         )
     assert (artifact_root / "asset/shot.jpg").stat().st_nlink == 2
+
+
+def test_existing_asset_changed_during_decode_fails_closed(
+    roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import_root, artifact_root = roots
+    source = import_root / "shot.jpg"
+    source.write_bytes(JPEG)
+    importer = _importer(roots)
+    imported = importer.import_asset(
+        source_path="shot.jpg",
+        destination_path="asset/shot.jpg",
+        expected_mime_type="image/jpeg",
+        expected_sha256=_digest(JPEG),
+    )
+    target = artifact_root / imported.relative_path
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    real_verify = importer._decoder.verify
+    changed = False
+
+    def changing_verify(descriptor: int, mime_type: str) -> None:
+        nonlocal changed
+        real_verify(descriptor, mime_type)
+        details = os.fstat(descriptor)
+        if not changed and (details.st_dev, details.st_ino) == target_identity:
+            changed = True
+            mutated = bytearray(target.read_bytes())
+            mutated[-20] ^= 1
+            target.write_bytes(mutated)
+
+    monkeypatch.setattr(importer._decoder, "verify", changing_verify)
+    with pytest.raises(UnsafeAssetPath, match="changed during verification"):
+        importer.import_asset(
+            source_path="shot.jpg",
+            destination_path="asset/shot.jpg",
+            expected_mime_type="image/jpeg",
+            expected_sha256=_digest(JPEG),
+        )
+    assert changed
 
 
 def test_import_errors_and_logs_do_not_reveal_paths(

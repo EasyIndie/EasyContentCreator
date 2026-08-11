@@ -356,6 +356,9 @@ class _DecoderVerifier:
                 str(self._ffmpeg),
                 "-v",
                 "error",
+                "-xerror",
+                "-err_detect",
+                "explode",
                 "-nostdin",
                 "-i",
                 fd_path,
@@ -586,23 +589,20 @@ class LocalAssetImporter:
         try:
             before = os.fstat(existing_fd)
             existing_sha256, existing_size = _sha256_fd(existing_fd)
-            after = os.fstat(existing_fd)
-            if (
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_ctime_ns,
-                before.st_nlink,
-            ) != (
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-                after.st_nlink,
-            ):
-                raise UnsafeAssetPath("artifact destination changed during verification")
             if existing_sha256 != expected_sha256:
                 raise ImmutableAssetConflict("immutable asset destination already exists")
             _structural_validate(existing_fd, expected_mime_type)
             self._decoder.verify(existing_fd, expected_mime_type)
+            verified_sha256, verified_size = _sha256_fd(existing_fd)
+            after = os.fstat(existing_fd)
+            if _file_identity(before) != _file_identity(after):
+                raise UnsafeAssetPath("artifact destination changed during verification")
+            if (
+                verified_sha256 != expected_sha256
+                or verified_sha256 != existing_sha256
+                or verified_size != existing_size
+            ):
+                raise UnsafeAssetPath("artifact destination changed during verification")
         finally:
             os.close(existing_fd)
         return ImportedAsset(
@@ -612,6 +612,18 @@ class LocalAssetImporter:
             byte_size=existing_size,
             recovered=recovered,
         )
+
+
+def _file_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_nlink,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
 
 
 def _platform_binary(name: str) -> Path:
