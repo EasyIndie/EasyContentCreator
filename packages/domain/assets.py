@@ -17,6 +17,8 @@ def _utc(value: datetime) -> datetime:
 
 def _safe_provenance_uri(value: str, field_name: str) -> str:
     parts = urlsplit(value)
+    if parts.query or parts.fragment:
+        raise ValueError(f"{field_name} must not contain query or fragment")
     if (
         parts.scheme == "https"
         and parts.netloc

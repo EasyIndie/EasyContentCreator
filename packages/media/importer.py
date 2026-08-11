@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
-import shutil
-import tempfile
+import secrets
+import stat
+import subprocess
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -36,6 +39,15 @@ _EXTENSIONS = {
     "audio/wav": frozenset({".wav"}),
     "audio/mpeg": frozenset({".mp3"}),
 }
+_EXPECTED_STREAM = {
+    "image/jpeg": "video",
+    "image/png": "video",
+    "video/mp4": "video",
+    "audio/wav": "audio",
+    "audio/mpeg": "audio",
+}
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
 
 
 def _relative_path(raw: str) -> PurePosixPath:
@@ -49,40 +61,329 @@ def _relative_path(raw: str) -> PurePosixPath:
     return path
 
 
-def _has_symlink(root: Path, parts: tuple[str, ...]) -> bool:
-    current = root
-    for part in parts:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
+def _open_root(path: Path) -> int:
+    try:
+        descriptor = os.open(path, _DIRECTORY_FLAGS)
+    except OSError as error:
+        raise UnsafeAssetPath("asset root is unavailable") from error
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise UnsafeAssetPath("asset root is unavailable")
+    return descriptor
 
 
-def _sha256(path: Path) -> tuple[str, int]:
+def _open_directory(parent_fd: int, name: str, *, create: bool) -> int:
+    if create:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise UnsafeAssetPath("artifact destination is unsafe") from error
+    try:
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as error:
+        raise UnsafeAssetPath("asset directory is unsafe") from error
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise UnsafeAssetPath("asset directory is unsafe")
+    return descriptor
+
+
+def _walk_parent(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+    current_fd = os.dup(root_fd)
+    try:
+        for part in parts:
+            next_fd = _open_directory(current_fd, part, create=create)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _open_regular(parent_fd: int, name: str) -> int:
+    try:
+        descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent_fd)
+    except OSError as error:
+        raise UnsafeAssetPath("asset file is unavailable") from error
+    details = os.fstat(descriptor)
+    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+        os.close(descriptor)
+        raise UnsafeAssetPath("asset file is unsafe")
+    return descriptor
+
+
+def _sha256_fd(descriptor: int) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(descriptor, "rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-            size += len(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+        size += len(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
     return digest.hexdigest(), size
 
 
-def _detected_mime(header: bytes) -> str | None:
-    if header.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if header.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if len(header) >= 12 and header[4:8] == b"ftyp":
-        return "video/mp4"
-    if header.startswith(b"RIFF") and header[8:12] == b"WAVE":
-        return "audio/wav"
-    if header.startswith(b"ID3") or (
-        len(header) >= 2 and header[0] == 0xFF and header[1] & 0xE0 == 0xE0
+def _copy_fd(source_fd: int, target_fd: int) -> None:
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    while chunk := os.read(source_fd, 1024 * 1024):
+        view = memoryview(chunk)
+        while view:
+            written = os.write(target_fd, view)
+            view = view[written:]
+    os.fsync(target_fd)
+    os.lseek(target_fd, 0, os.SEEK_SET)
+
+
+def _read_all(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return b"".join(chunks)
+
+
+def _validate_png(content: bytes) -> None:
+    if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise UnsupportedAssetMediaType("asset content does not match media type")
+    offset = 8
+    seen_ihdr = False
+    seen_iend = False
+    while offset < len(content):
+        if offset + 12 > len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        length = int.from_bytes(content[offset : offset + 4], "big")
+        kind = content[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if end > len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        payload = content[offset + 8 : offset + 8 + length]
+        expected_crc = int.from_bytes(content[offset + 8 + length : end], "big")
+        if zlib.crc32(kind + payload) & 0xFFFFFFFF != expected_crc:
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        if not seen_ihdr and (kind != b"IHDR" or length != 13):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        seen_ihdr = True
+        offset = end
+        if kind == b"IEND":
+            if length != 0 or offset != len(content):
+                raise UnsupportedAssetMediaType("asset media contains trailing data")
+            seen_iend = True
+            break
+    if not seen_ihdr or not seen_iend:
+        raise UnsupportedAssetMediaType("asset media is damaged")
+
+
+def _validate_jpeg(content: bytes) -> None:
+    if len(content) < 4 or not content.startswith(b"\xff\xd8"):
+        raise UnsupportedAssetMediaType("asset media is damaged")
+    offset = 2
+    in_scan = False
+    while offset < len(content):
+        if content[offset] != 0xFF:
+            if in_scan:
+                offset += 1
+                continue
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        while offset < len(content) and content[offset] == 0xFF:
+            offset += 1
+        if offset >= len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        marker = content[offset]
+        offset += 1
+        if in_scan and marker == 0x00:
+            continue
+        if marker == 0xD9:
+            if offset != len(content):
+                raise UnsupportedAssetMediaType("asset media contains trailing data")
+            return
+        if marker in range(0xD0, 0xD8) or marker in {0x01, 0xD8}:
+            continue
+        if offset + 2 > len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        segment_length = int.from_bytes(content[offset : offset + 2], "big")
+        if segment_length < 2 or offset + segment_length > len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        offset += segment_length
+        in_scan = marker == 0xDA
+    raise UnsupportedAssetMediaType("asset media is damaged")
+
+
+def _validate_riff(content: bytes) -> None:
+    if len(content) < 12 or content[:4] != b"RIFF" or content[8:12] != b"WAVE":
+        raise UnsupportedAssetMediaType("asset content does not match media type")
+    if int.from_bytes(content[4:8], "little") + 8 != len(content):
+        raise UnsupportedAssetMediaType("asset media contains trailing or truncated data")
+
+
+def _validate_mp4(content: bytes) -> None:
+    offset = 0
+    kinds: set[bytes] = set()
+    while offset < len(content):
+        if offset + 8 > len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        size = int.from_bytes(content[offset : offset + 4], "big")
+        kind = content[offset + 4 : offset + 8]
+        header_size = 8
+        if size == 1:
+            if offset + 16 > len(content):
+                raise UnsupportedAssetMediaType("asset media is damaged")
+            size = int.from_bytes(content[offset + 8 : offset + 16], "big")
+            header_size = 16
+        if size < header_size or offset + size > len(content):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        kinds.add(kind)
+        offset += size
+    if (
+        offset != len(content)
+        or b"ftyp" not in kinds
+        or b"moov" not in kinds
+        or b"mdat" not in kinds
     ):
-        return "audio/mpeg"
-    return None
+        raise UnsupportedAssetMediaType("asset media is damaged")
+
+
+def _validate_mp3(content: bytes) -> None:
+    offset = 0
+    end = len(content)
+    if content.startswith(b"ID3"):
+        if len(content) < 10 or any(byte & 0x80 for byte in content[6:10]):
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        tag_size = sum(
+            byte << shift for byte, shift in zip(content[6:10], (21, 14, 7, 0), strict=True)
+        )
+        offset = 10 + tag_size + (10 if content[5] & 0x10 else 0)
+    if end >= 128 and content[end - 128 : end - 125] == b"TAG":
+        end -= 128
+    frames = 0
+    bitrate_v1 = {
+        1: (32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+        2: (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+        3: (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    }
+    bitrate_v2 = {
+        1: (32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+        2: (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+        3: (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+    }
+    while offset < end:
+        if offset + 4 > end:
+            raise UnsupportedAssetMediaType("asset media contains trailing data")
+        header = int.from_bytes(content[offset : offset + 4], "big")
+        if header >> 21 != 0x7FF:
+            raise UnsupportedAssetMediaType("asset media contains trailing data")
+        version = (header >> 19) & 0b11
+        layer_bits = (header >> 17) & 0b11
+        bitrate_index = (header >> 12) & 0xF
+        sample_index = (header >> 10) & 0b11
+        padding = (header >> 9) & 1
+        if version == 1 or layer_bits == 0 or bitrate_index in {0, 15} or sample_index == 3:
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        layer = 4 - layer_bits
+        tables = bitrate_v1 if version == 3 else bitrate_v2
+        bitrate = tables[layer][bitrate_index - 1] * 1000
+        sample_rates = (44100, 48000, 32000)
+        sample_rate = sample_rates[sample_index]
+        if version == 2:
+            sample_rate //= 2
+        elif version == 0:
+            sample_rate //= 4
+        if layer == 1:
+            frame_size = (12 * bitrate // sample_rate + padding) * 4
+        else:
+            coefficient = 72 if layer == 3 and version != 3 else 144
+            frame_size = coefficient * bitrate // sample_rate + padding
+        if frame_size < 4 or offset + frame_size > end:
+            raise UnsupportedAssetMediaType("asset media is damaged")
+        offset += frame_size
+        frames += 1
+    if frames == 0:
+        raise UnsupportedAssetMediaType("asset media is damaged")
+
+
+def _structural_validate(descriptor: int, mime_type: str) -> None:
+    content = _read_all(descriptor)
+    if mime_type == "image/png":
+        _validate_png(content)
+    elif mime_type == "image/jpeg":
+        _validate_jpeg(content)
+    elif mime_type == "audio/wav":
+        _validate_riff(content)
+    elif mime_type == "video/mp4":
+        _validate_mp4(content)
+    elif mime_type == "audio/mpeg":
+        _validate_mp3(content)
+
+
+class _DecoderVerifier:
+    def __init__(self, *, ffprobe: Path, ffmpeg: Path, timeout_seconds: float) -> None:
+        self._ffprobe = ffprobe
+        self._ffmpeg = ffmpeg
+        self._timeout_seconds = timeout_seconds
+        for binary in (ffprobe, ffmpeg):
+            if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+                raise ValueError("media decoder binaries must be absolute executable files")
+
+    def verify(self, descriptor: int, mime_type: str) -> None:
+        fd_path = f"/dev/fd/{descriptor}"
+        probe = self._run(
+            (
+                str(self._ffprobe),
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "json",
+                fd_path,
+            ),
+            descriptor,
+        )
+        try:
+            document = json.loads(probe.stdout)
+            streams = document["streams"]
+            stream_types = {item["codec_type"] for item in streams}
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise UnsupportedAssetMediaType("asset media probe failed") from error
+        expected_stream = _EXPECTED_STREAM[mime_type]
+        if expected_stream not in stream_types or not stream_types.issubset({expected_stream}):
+            raise UnsupportedAssetMediaType("asset media streams do not match media type")
+        self._run(
+            (
+                str(self._ffmpeg),
+                "-v",
+                "error",
+                "-nostdin",
+                "-i",
+                fd_path,
+                "-f",
+                "null",
+                "-",
+            ),
+            descriptor,
+        )
+
+    def _run(self, command: tuple[str, ...], descriptor: int) -> subprocess.CompletedProcess[str]:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_seconds,
+                pass_fds=(descriptor,),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UnsupportedAssetMediaType("asset media decoder failed") from error
+        finally:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        if completed.returncode != 0:
+            raise UnsupportedAssetMediaType("asset media decoder rejected content")
+        return completed
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,17 +396,26 @@ class ImportedAsset:
 
 
 class LocalAssetImporter:
-    def __init__(self, *, import_root: Path, artifact_root: Path) -> None:
-        self._import_root = import_root.resolve(strict=True)
-        self._artifact_root = artifact_root.resolve(strict=True)
-        if not self._import_root.is_dir() or not self._artifact_root.is_dir():
-            raise ValueError("asset roots must be directories")
-        self._lock_root = self._artifact_root / ".import-locks"
-        if self._lock_root.is_symlink():
-            raise UnsafeAssetPath("asset lock directory is a symbolic link")
-        self._lock_root.mkdir(mode=0o700, exist_ok=True)
-        if not self._lock_root.resolve().is_relative_to(self._artifact_root):
-            raise UnsafeAssetPath("asset lock directory escaped artifact root")
+    def __init__(
+        self,
+        *,
+        import_root: Path,
+        artifact_root: Path,
+        ffprobe: Path | None = None,
+        ffmpeg: Path | None = None,
+        decoder_timeout_seconds: float = 30.0,
+    ) -> None:
+        self._import_root = import_root.absolute()
+        self._artifact_root = artifact_root.absolute()
+        import_fd = _open_root(self._import_root)
+        artifact_fd = _open_root(self._artifact_root)
+        os.close(import_fd)
+        os.close(artifact_fd)
+        self._decoder = _DecoderVerifier(
+            ffprobe=ffprobe or _platform_binary("ffprobe"),
+            ffmpeg=ffmpeg or _platform_binary("ffmpeg"),
+            timeout_seconds=decoder_timeout_seconds,
+        )
 
     def import_asset(
         self,
@@ -126,87 +436,191 @@ class LocalAssetImporter:
         ):
             raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
 
-        if _has_symlink(self._import_root, source_relative.parts):
-            raise UnsafeAssetPath("symbolic links are not accepted for asset import")
-        source = self._import_root.joinpath(*source_relative.parts)
+        import_fd = _open_root(self._import_root)
+        artifact_fd = _open_root(self._artifact_root)
         try:
-            source_resolved = source.resolve(strict=True)
-        except (FileNotFoundError, RuntimeError) as error:
-            raise UnsafeAssetPath("asset source is unavailable") from error
-        if not source_resolved.is_relative_to(self._import_root) or not source_resolved.is_file():
-            raise UnsafeAssetPath("asset source escaped import root")
-
-        if _has_symlink(self._artifact_root, destination_relative.parts[:-1]):
-            raise UnsafeAssetPath("artifact destination contains a symbolic link")
-        destination = self._artifact_root.joinpath(*destination_relative.parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination_parent = destination.parent.resolve(strict=True)
-        if not destination_parent.is_relative_to(self._artifact_root):
-            raise UnsafeAssetPath("artifact destination escaped artifact root")
-        destination = destination_parent / destination.name
-
-        temporary_name: str | None = None
-        try:
+            source_parent_fd = _walk_parent(import_fd, source_relative.parts[:-1], create=False)
             try:
-                source_descriptor = os.open(source_resolved, os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError as error:
-                raise UnsafeAssetPath("asset source is unavailable") from error
-            with os.fdopen(source_descriptor, "rb") as source_stream:
-                header = source_stream.read(32)
-                if _detected_mime(header) != expected_mime_type:
-                    raise UnsupportedAssetMediaType("asset content does not match media type")
-                source_stream.seek(0)
-                with tempfile.NamedTemporaryFile(
-                    mode="wb",
-                    dir=destination.parent,
-                    prefix=".asset-attempt-",
-                    suffix=".tmp",
-                    delete=False,
-                ) as temporary:
-                    temporary_name = temporary.name
-                    shutil.copyfileobj(source_stream, temporary, length=1024 * 1024)
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
+                source_fd = _open_regular(source_parent_fd, source_relative.name)
+            finally:
+                os.close(source_parent_fd)
+            try:
+                return self._import_open_source(
+                    source_fd=source_fd,
+                    artifact_fd=artifact_fd,
+                    destination=destination_relative,
+                    expected_mime_type=expected_mime_type,
+                    expected_sha256=expected_sha256,
+                )
+            finally:
+                os.close(source_fd)
+        finally:
+            os.close(import_fd)
+            os.close(artifact_fd)
 
-            temporary_path = Path(temporary_name)
-            actual_sha256, byte_size = _sha256(temporary_path)
+    def _import_open_source(
+        self,
+        *,
+        source_fd: int,
+        artifact_fd: int,
+        destination: PurePosixPath,
+        expected_mime_type: str,
+        expected_sha256: str,
+    ) -> ImportedAsset:
+        parent_fd = _walk_parent(artifact_fd, destination.parts[:-1], create=True)
+        temp_name = f".asset-attempt-{secrets.token_hex(16)}.tmp"
+        temp_fd: int | None = None
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            _copy_fd(source_fd, temp_fd)
+            actual_sha256, byte_size = _sha256_fd(temp_fd)
             if actual_sha256 != expected_sha256:
                 raise AssetDigestMismatch("asset digest changed during import")
-
-            lock_digest = hashlib.sha256(destination_relative.as_posix().encode()).hexdigest()
-            lock_path = self._lock_root / f"{lock_digest}.lock"
-            with lock_path.open("a+b") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                if destination.is_symlink():
-                    raise UnsafeAssetPath("artifact destination is a symbolic link")
-                if destination.exists():
-                    try:
-                        existing_sha256, existing_size = _sha256(destination)
-                    except OSError as error:
-                        raise UnsafeAssetPath("artifact destination is unsafe") from error
-                    if existing_sha256 != expected_sha256:
-                        raise ImmutableAssetConflict("immutable asset destination already exists")
-                    return ImportedAsset(
-                        relative_path=destination_relative.as_posix(),
-                        sha256=existing_sha256,
-                        mime_type=expected_mime_type,
-                        byte_size=existing_size,
-                        recovered=True,
-                    )
-                os.replace(temporary_path, destination)
-                temporary_name = None
-                directory_fd = os.open(destination.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-            return ImportedAsset(
-                relative_path=destination_relative.as_posix(),
-                sha256=actual_sha256,
-                mime_type=expected_mime_type,
+            _structural_validate(temp_fd, expected_mime_type)
+            self._decoder.verify(temp_fd, expected_mime_type)
+            return self._publish(
+                artifact_fd=artifact_fd,
+                parent_fd=parent_fd,
+                destination=destination,
+                temp_name=temp_name,
+                expected_sha256=expected_sha256,
+                expected_mime_type=expected_mime_type,
                 byte_size=byte_size,
-                recovered=False,
             )
         finally:
-            if temporary_name is not None:
-                Path(temporary_name).unlink(missing_ok=True)
+            if temp_fd is not None:
+                os.close(temp_fd)
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            os.close(parent_fd)
+
+    def _publish(
+        self,
+        *,
+        artifact_fd: int,
+        parent_fd: int,
+        destination: PurePosixPath,
+        temp_name: str,
+        expected_sha256: str,
+        expected_mime_type: str,
+        byte_size: int,
+    ) -> ImportedAsset:
+        lock_root_fd = _open_directory(artifact_fd, ".import-locks", create=True)
+        lock_digest = hashlib.sha256(destination.as_posix().encode()).hexdigest()
+        lock_fd: int | None = None
+        try:
+            lock_fd = os.open(
+                f"{lock_digest}.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=lock_root_fd,
+            )
+            lock_stat = os.fstat(lock_fd)
+            if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+                raise UnsafeAssetPath("asset lock is unsafe")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+            rechecked_parent_fd = _walk_parent(artifact_fd, destination.parts[:-1], create=False)
+            try:
+                expected_parent = os.fstat(parent_fd)
+                actual_parent = os.fstat(rechecked_parent_fd)
+                if (expected_parent.st_dev, expected_parent.st_ino) != (
+                    actual_parent.st_dev,
+                    actual_parent.st_ino,
+                ):
+                    raise UnsafeAssetPath("artifact destination changed during import")
+                try:
+                    os.link(
+                        temp_name,
+                        destination.name,
+                        src_dir_fd=rechecked_parent_fd,
+                        dst_dir_fd=rechecked_parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    return self._recover_existing(
+                        rechecked_parent_fd,
+                        destination,
+                        expected_sha256,
+                        expected_mime_type,
+                    )
+                os.unlink(temp_name, dir_fd=rechecked_parent_fd)
+                os.fsync(rechecked_parent_fd)
+                published = self._recover_existing(
+                    rechecked_parent_fd,
+                    destination,
+                    expected_sha256,
+                    expected_mime_type,
+                    recovered=False,
+                )
+            finally:
+                os.close(rechecked_parent_fd)
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            os.close(lock_root_fd)
+        if published.byte_size != byte_size:
+            raise UnsafeAssetPath("published asset size changed")
+        return published
+
+    def _recover_existing(
+        self,
+        parent_fd: int,
+        destination: PurePosixPath,
+        expected_sha256: str,
+        expected_mime_type: str,
+        *,
+        recovered: bool = True,
+    ) -> ImportedAsset:
+        try:
+            existing_fd = _open_regular(parent_fd, destination.name)
+        except UnsafeAssetPath as error:
+            raise UnsafeAssetPath("artifact destination is unsafe") from error
+        try:
+            before = os.fstat(existing_fd)
+            existing_sha256, existing_size = _sha256_fd(existing_fd)
+            after = os.fstat(existing_fd)
+            if (
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+                before.st_nlink,
+            ) != (
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+                after.st_nlink,
+            ):
+                raise UnsafeAssetPath("artifact destination changed during verification")
+            if existing_sha256 != expected_sha256:
+                raise ImmutableAssetConflict("immutable asset destination already exists")
+            _structural_validate(existing_fd, expected_mime_type)
+            self._decoder.verify(existing_fd, expected_mime_type)
+        finally:
+            os.close(existing_fd)
+        return ImportedAsset(
+            relative_path=destination.as_posix(),
+            sha256=existing_sha256,
+            mime_type=expected_mime_type,
+            byte_size=existing_size,
+            recovered=recovered,
+        )
+
+
+def _platform_binary(name: str) -> Path:
+    candidates = (
+        Path("/usr/bin") / name,
+        Path("/usr/local/bin") / name,
+        Path("/opt/homebrew/bin") / name,
+    )
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise ValueError("required media decoder binary is unavailable")
