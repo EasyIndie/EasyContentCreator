@@ -4,11 +4,19 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
-from packages.domain import Artifact, ArtifactKind, LogicalArtifactRef, StepKind, StepRunSpec
+from packages.domain import (
+    Artifact,
+    ArtifactKind,
+    LogicalArtifactRef,
+    StepKind,
+    StepOutputReservation,
+    StepRunSpec,
+)
 from packages.domain.pipeline import validate_logical_key, validate_name, validate_version
 from packages.domain.types import FrozenJsonValue
 
@@ -22,15 +30,48 @@ class StepTrigger(StrEnum):
     APPROVAL = "approval"
 
 
+class OutputCardinality(StrEnum):
+    SINGLE = "single"
+    FANOUT = "fanout"
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactSlotDefinition:
     name: str
     kind: ArtifactKind
-    logical_key: str
+    logical_key_template: str
+    cardinality: OutputCardinality = OutputCardinality.SINGLE
+    allowed_item_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_name(self.name, "slot name")
-        validate_logical_key(self.logical_key)
+        template = self.logical_key_template
+        if self.cardinality is OutputCardinality.SINGLE:
+            validate_logical_key(template)
+            if self.allowed_item_keys:
+                raise ValueError("single output must not declare item keys")
+        else:
+            if template.count("{item_key}") != 1:
+                raise ValueError("fanout logical key template must contain one {item_key}")
+            validate_logical_key(template.replace("{item_key}", "item"))
+            items = tuple(self.allowed_item_keys)
+            if len(set(items)) != len(items):
+                raise ValueError("allowed_item_keys must not contain duplicates")
+            for item in items:
+                validate_name(item, "allowed item key")
+            object.__setattr__(self, "allowed_item_keys", items)
+
+    def logical_key_for(self, item_key: str | None) -> str:
+        if self.cardinality is OutputCardinality.SINGLE:
+            if item_key is not None:
+                raise ValueError("single output must not have item_key")
+            return self.logical_key_template
+        if item_key is None:
+            raise ValueError("fanout output requires item_key")
+        validate_name(item_key, "item_key")
+        if self.allowed_item_keys and item_key not in self.allowed_item_keys:
+            raise ValueError(f"item_key {item_key} is not allowed for {self.name}")
+        return self.logical_key_template.replace("{item_key}", item_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +93,7 @@ class StepDefinition:
     inputs: tuple[StepInputDefinition, ...]
     outputs: tuple[ArtifactSlotDefinition, ...]
     trigger: StepTrigger = StepTrigger.AUTOMATIC
+    required_for_run_completion: bool = True
 
     def __post_init__(self) -> None:
         validate_version(self.version, "step version")
@@ -59,12 +101,12 @@ class StepDefinition:
         outputs = tuple(self.outputs)
         if len({item.name for item in inputs}) != len(inputs):
             raise ValueError(f"step {self.kind} has duplicate input names")
-        if len(outputs) != 1:
-            raise ValueError(f"step {self.kind} must declare exactly one reserved output")
+        if not outputs:
+            raise ValueError(f"step {self.kind} must declare outputs")
         if len({item.name for item in outputs}) != len(outputs):
             raise ValueError(f"step {self.kind} has duplicate output names")
-        if len({item.logical_key for item in outputs}) != len(outputs):
-            raise ValueError(f"step {self.kind} has duplicate output logical keys")
+        if self.trigger is StepTrigger.APPROVAL and self.required_for_run_completion:
+            raise ValueError("approval-triggered steps cannot block review-ready run completion")
         object.__setattr__(self, "inputs", inputs)
         object.__setattr__(self, "outputs", outputs)
 
@@ -83,14 +125,16 @@ class PipelineDefinition:
         validate_version(self.profile_version, "profile version")
         external_inputs = tuple(self.external_inputs)
         steps = tuple(self.steps)
-        if not external_inputs:
-            raise ValueError("pipeline must declare at least one external input")
+        if not external_inputs or not steps:
+            raise ValueError("pipeline requires external inputs and steps")
         if len({item.name for item in external_inputs}) != len(external_inputs):
             raise ValueError("pipeline has duplicate external input names")
-        if not steps:
-            raise ValueError("pipeline must declare at least one step")
         if len({step.kind for step in steps}) != len(steps):
             raise ValueError("pipeline has duplicate step kinds")
+        templates = [slot.logical_key_template for slot in external_inputs]
+        templates.extend(slot.logical_key_template for step in steps for slot in step.outputs)
+        if len(set(templates)) != len(templates):
+            raise ValueError("pipeline logical output templates must be globally unique")
         object.__setattr__(self, "external_inputs", external_inputs)
         object.__setattr__(self, "steps", steps)
         _validate_bindings_and_acyclic(self)
@@ -102,8 +146,6 @@ class PipelineDefinition:
         raise KeyError(kind)
 
     def topological_steps(self) -> tuple[StepDefinition, ...]:
-        """Return stable topological order, independent from declaration order."""
-
         by_kind = {step.kind: step for step in self.steps}
         dependencies = {
             step.kind: {item.source_step for item in step.inputs if item.source_step is not None}
@@ -122,6 +164,43 @@ class PipelineDefinition:
             remaining.difference_update(ready)
         return tuple(result)
 
+    def run_completion_steps(self) -> tuple[StepDefinition, ...]:
+        """Nodes required before the run is review-bundle ready.
+
+        Approval-triggered channel packages are linked to the succeeded run but
+        do not delay its review-ready terminal state.
+        """
+
+        return tuple(step for step in self.topological_steps() if step.required_for_run_completion)
+
+    def validate_step_spec(self, spec: StepRunSpec) -> None:
+        step = self.step(spec.step_kind)
+        if spec.step_version != step.version or spec.profile_version != self.profile_version:
+            raise ValueError("StepRunSpec version does not match PipelineDefinition")
+        bindings = {item.name: item for item in step.inputs}
+        if {item.binding_name for item in spec.input_refs} != set(bindings):
+            raise ValueError("StepRunSpec inputs do not exactly match step bindings")
+        for item in spec.input_refs:
+            if item.artifact.kind is not bindings[item.binding_name].kind:
+                raise ValueError(
+                    f"binding {item.binding_name} Artifact kind does not match definition"
+                )
+        slots = {item.name: item for item in step.outputs}
+        for output in spec.outputs:
+            slot = slots.get(output.slot_name)
+            if slot is None or output.kind is not slot.kind:
+                raise ValueError("StepRunSpec output does not match definition slot/kind")
+            if output.logical_key != slot.logical_key_for(output.item_key):
+                raise ValueError("StepRunSpec output logical key does not match definition")
+        singles = {
+            slot.name for slot in step.outputs if slot.cardinality is OutputCardinality.SINGLE
+        }
+        actual_singles = {
+            output.slot_name for output in spec.outputs if output.slot_name in singles
+        }
+        if actual_singles != singles:
+            raise ValueError("StepRunSpec must reserve every single output")
+
 
 def _validate_bindings_and_acyclic(definition: PipelineDefinition) -> None:
     external = {slot.name: slot for slot in definition.external_inputs}
@@ -131,75 +210,72 @@ def _validate_bindings_and_acyclic(definition: PipelineDefinition) -> None:
             if binding.source_step is None:
                 source = external.get(binding.source_slot)
                 if source is None:
-                    raise ValueError(
-                        f"step {step.kind} references missing external slot {binding.source_slot}"
-                    )
+                    raise ValueError(f"step {step.kind} references missing external slot")
             else:
                 producer = steps.get(binding.source_step)
                 if producer is None:
-                    raise ValueError(
-                        f"step {step.kind} references missing producer {binding.source_step}"
-                    )
+                    raise ValueError(f"step {step.kind} references missing producer")
                 source = next(
                     (slot for slot in producer.outputs if slot.name == binding.source_slot), None
                 )
                 if source is None:
-                    raise ValueError(
-                        f"step {step.kind} references missing output "
-                        f"{binding.source_step}.{binding.source_slot}"
-                    )
+                    raise ValueError(f"step {step.kind} references missing output")
             if source.kind is not binding.kind:
-                raise ValueError(
-                    f"step {step.kind} input {binding.name} kind does not match its source"
-                )
+                raise ValueError(f"step {step.kind} input kind does not match source")
     definition.topological_steps()
 
 
-def _slot(name: str, kind: ArtifactKind, logical_key: str | None = None) -> ArtifactSlotDefinition:
-    return ArtifactSlotDefinition(name, kind, logical_key or name)
+def _single(name: str, kind: ArtifactKind, key: str | None = None) -> ArtifactSlotDefinition:
+    return ArtifactSlotDefinition(name, kind, key or name)
+
+
+def _fanout(
+    name: str,
+    kind: ArtifactKind,
+    template: str,
+    allowed: tuple[str, ...] = (),
+) -> ArtifactSlotDefinition:
+    return ArtifactSlotDefinition(name, kind, template, OutputCardinality.FANOUT, allowed)
 
 
 def _input(
-    name: str,
-    kind: ArtifactKind,
-    source_step: StepKind | None,
-    source_slot: str,
+    name: str, kind: ArtifactKind, source_step: StepKind | None, source_slot: str
 ) -> StepInputDefinition:
     return StepInputDefinition(name, kind, source_step, source_slot)
 
 
 def short_video_v1_definition() -> PipelineDefinition:
-    fact_card = _input("fact_card", ArtifactKind.FACT_CARD, None, "fact_card")
+    fact = _input("fact_card", ArtifactKind.FACT_CARD, None, "fact_card")
     steps = (
         StepDefinition(
-            StepKind.TOPIC_BRIEF,
-            "v1",
-            (fact_card,),
-            (_slot("topic_brief", ArtifactKind.TOPIC_BRIEF),),
+            StepKind.TOPIC_BRIEF, "v1", (fact,), (_single("topic_brief", ArtifactKind.TOPIC_BRIEF),)
         ),
         StepDefinition(
             StepKind.SCRIPT,
             "v1",
             (_input("topic_brief", ArtifactKind.TOPIC_BRIEF, StepKind.TOPIC_BRIEF, "topic_brief"),),
-            (_slot("script", ArtifactKind.SCRIPT),),
+            (_single("script", ArtifactKind.SCRIPT),),
         ),
         StepDefinition(
             StepKind.STORYBOARD,
             "v1",
             (_input("script", ArtifactKind.SCRIPT, StepKind.SCRIPT, "script"),),
-            (_slot("storyboard", ArtifactKind.STORYBOARD),),
+            (_single("storyboard", ArtifactKind.STORYBOARD),),
         ),
         StepDefinition(
             StepKind.ASSET_MANIFEST,
             "v1",
             (_input("storyboard", ArtifactKind.STORYBOARD, StepKind.STORYBOARD, "storyboard"),),
-            (_slot("asset_manifest", ArtifactKind.ASSET_MANIFEST),),
+            (
+                _single("asset_manifest", ArtifactKind.ASSET_MANIFEST),
+                _fanout("shot_asset", ArtifactKind.MEDIA, "asset/{item_key}"),
+            ),
         ),
         StepDefinition(
             StepKind.VOICEOVER,
             "v1",
             (_input("script", ArtifactKind.SCRIPT, StepKind.SCRIPT, "script"),),
-            (_slot("voiceover", ArtifactKind.VOICEOVER),),
+            (_single("voiceover", ArtifactKind.VOICEOVER),),
         ),
         StepDefinition(
             StepKind.SUBTITLES,
@@ -208,7 +284,7 @@ def short_video_v1_definition() -> PipelineDefinition:
                 _input("script", ArtifactKind.SCRIPT, StepKind.SCRIPT, "script"),
                 _input("voiceover", ArtifactKind.VOICEOVER, StepKind.VOICEOVER, "voiceover"),
             ),
-            (_slot("subtitles", ArtifactKind.SUBTITLES),),
+            (_single("subtitles", ArtifactKind.SUBTITLES),),
         ),
         StepDefinition(
             StepKind.COVER,
@@ -222,7 +298,7 @@ def short_video_v1_definition() -> PipelineDefinition:
                     "asset_manifest",
                 ),
             ),
-            (_slot("cover", ArtifactKind.COVER),),
+            (_single("cover", ArtifactKind.COVER),),
         ),
         StepDefinition(
             StepKind.VIDEO_MASTER,
@@ -237,13 +313,13 @@ def short_video_v1_definition() -> PipelineDefinition:
                 _input("voiceover", ArtifactKind.VOICEOVER, StepKind.VOICEOVER, "voiceover"),
                 _input("subtitles", ArtifactKind.SUBTITLES, StepKind.SUBTITLES, "subtitles"),
             ),
-            (_slot("video_master", ArtifactKind.VIDEO_MASTER),),
+            (_single("video_master", ArtifactKind.VIDEO_MASTER),),
         ),
         StepDefinition(
             StepKind.QC_REPORT,
             "v1",
             (
-                fact_card,
+                fact,
                 _input(
                     "asset_manifest",
                     ArtifactKind.ASSET_MANIFEST,
@@ -253,29 +329,23 @@ def short_video_v1_definition() -> PipelineDefinition:
                 _input("subtitles", ArtifactKind.SUBTITLES, StepKind.SUBTITLES, "subtitles"),
                 _input("cover", ArtifactKind.COVER, StepKind.COVER, "cover"),
                 _input(
-                    "video_master",
-                    ArtifactKind.VIDEO_MASTER,
-                    StepKind.VIDEO_MASTER,
-                    "video_master",
+                    "video_master", ArtifactKind.VIDEO_MASTER, StepKind.VIDEO_MASTER, "video_master"
                 ),
             ),
-            (_slot("qc_report", ArtifactKind.QC_REPORT),),
+            (_single("qc_report", ArtifactKind.QC_REPORT),),
         ),
         StepDefinition(
             StepKind.REVIEW_BUNDLE,
             "v1",
             (
-                fact_card,
+                fact,
                 _input("cover", ArtifactKind.COVER, StepKind.COVER, "cover"),
                 _input(
-                    "video_master",
-                    ArtifactKind.VIDEO_MASTER,
-                    StepKind.VIDEO_MASTER,
-                    "video_master",
+                    "video_master", ArtifactKind.VIDEO_MASTER, StepKind.VIDEO_MASTER, "video_master"
                 ),
                 _input("qc_report", ArtifactKind.QC_REPORT, StepKind.QC_REPORT, "qc_report"),
             ),
-            (_slot("review_bundle", ArtifactKind.REVIEW_BUNDLE),),
+            (_single("review_bundle", ArtifactKind.REVIEW_BUNDLE),),
         ),
         StepDefinition(
             StepKind.CHANNEL_PACKAGE,
@@ -288,123 +358,82 @@ def short_video_v1_definition() -> PipelineDefinition:
                     "review_bundle",
                 ),
             ),
-            (_slot("channel_package", ArtifactKind.CHANNEL_PACKAGE, "channel/package"),),
+            (
+                _fanout(
+                    "channel_package",
+                    ArtifactKind.CHANNEL_PACKAGE,
+                    "channel/{item_key}/package",
+                    ("douyin", "wechat_channels"),
+                ),
+            ),
             StepTrigger.APPROVAL,
+            False,
         ),
     )
     definition = PipelineDefinition(
         SHORT_VIDEO_PIPELINE_KIND,
         SHORT_VIDEO_PIPELINE_VERSION,
         SHORT_VIDEO_PROFILE_VERSION,
-        (_slot("fact_card", ArtifactKind.FACT_CARD),),
+        (_single("fact_card", ArtifactKind.FACT_CARD),),
         steps,
     )
     validate_short_video_v1(definition)
     return definition
 
 
-_SHORT_VIDEO_REQUIRED_STEPS = frozenset(StepKind)
+def _definition_manifest(definition: PipelineDefinition) -> object:
+    return {
+        "external_inputs": [
+            (s.name, s.kind.value, s.logical_key_template, s.cardinality.value, s.allowed_item_keys)
+            for s in definition.external_inputs
+        ],
+        "kind": definition.kind,
+        "profile_version": definition.profile_version,
+        "steps": [
+            {
+                "completion": step.required_for_run_completion,
+                "inputs": [
+                    (
+                        i.name,
+                        i.kind.value,
+                        i.source_step.value if i.source_step else None,
+                        i.source_slot,
+                    )
+                    for i in step.inputs
+                ],
+                "kind": step.kind.value,
+                "outputs": [
+                    (
+                        o.name,
+                        o.kind.value,
+                        o.logical_key_template,
+                        o.cardinality.value,
+                        o.allowed_item_keys,
+                    )
+                    for o in step.outputs
+                ],
+                "trigger": step.trigger.value,
+                "version": step.version,
+            }
+            for step in definition.steps
+        ],
+        "version": definition.version,
+    }
+
+
+_SHORT_VIDEO_V1_GOLDEN_SHA256 = "c87371f877aae459b668ee806b2f5e15fad6b0016d6646b141ca741995dd94b9"
+
+
+def definition_digest(definition: PipelineDefinition) -> str:
+    content = json.dumps(
+        _definition_manifest(definition), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode()
+    return hashlib.sha256(content).hexdigest()
 
 
 def validate_short_video_v1(definition: PipelineDefinition) -> None:
-    if (
-        definition.kind != SHORT_VIDEO_PIPELINE_KIND
-        or definition.version != SHORT_VIDEO_PIPELINE_VERSION
-        or definition.profile_version != SHORT_VIDEO_PROFILE_VERSION
-    ):
-        raise ValueError("short_video_v1 identity or profile does not match the frozen contract")
-    actual = {step.kind for step in definition.steps}
-    if actual != _SHORT_VIDEO_REQUIRED_STEPS:
-        missing = sorted(kind.value for kind in _SHORT_VIDEO_REQUIRED_STEPS - actual)
-        extra = sorted(kind.value for kind in actual - _SHORT_VIDEO_REQUIRED_STEPS)
-        raise ValueError(f"short_video_v1 step set mismatch: missing={missing}, extra={extra}")
-    if definition.external_inputs != (_slot("fact_card", ArtifactKind.FACT_CARD),):
-        raise ValueError("short_video_v1 external inputs do not match the frozen contract")
-    expected: dict[StepKind, tuple[ArtifactKind, str, StepTrigger, frozenset[StepKind | None]]] = {
-        StepKind.TOPIC_BRIEF: (
-            ArtifactKind.TOPIC_BRIEF,
-            "topic_brief",
-            StepTrigger.AUTOMATIC,
-            frozenset({None}),
-        ),
-        StepKind.SCRIPT: (
-            ArtifactKind.SCRIPT,
-            "script",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.TOPIC_BRIEF}),
-        ),
-        StepKind.STORYBOARD: (
-            ArtifactKind.STORYBOARD,
-            "storyboard",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.SCRIPT}),
-        ),
-        StepKind.ASSET_MANIFEST: (
-            ArtifactKind.ASSET_MANIFEST,
-            "asset_manifest",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.STORYBOARD}),
-        ),
-        StepKind.VOICEOVER: (
-            ArtifactKind.VOICEOVER,
-            "voiceover",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.SCRIPT}),
-        ),
-        StepKind.SUBTITLES: (
-            ArtifactKind.SUBTITLES,
-            "subtitles",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.SCRIPT, StepKind.VOICEOVER}),
-        ),
-        StepKind.COVER: (
-            ArtifactKind.COVER,
-            "cover",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.STORYBOARD, StepKind.ASSET_MANIFEST}),
-        ),
-        StepKind.VIDEO_MASTER: (
-            ArtifactKind.VIDEO_MASTER,
-            "video_master",
-            StepTrigger.AUTOMATIC,
-            frozenset({StepKind.ASSET_MANIFEST, StepKind.VOICEOVER, StepKind.SUBTITLES}),
-        ),
-        StepKind.QC_REPORT: (
-            ArtifactKind.QC_REPORT,
-            "qc_report",
-            StepTrigger.AUTOMATIC,
-            frozenset(
-                {
-                    None,
-                    StepKind.ASSET_MANIFEST,
-                    StepKind.SUBTITLES,
-                    StepKind.COVER,
-                    StepKind.VIDEO_MASTER,
-                }
-            ),
-        ),
-        StepKind.REVIEW_BUNDLE: (
-            ArtifactKind.REVIEW_BUNDLE,
-            "review_bundle",
-            StepTrigger.AUTOMATIC,
-            frozenset({None, StepKind.COVER, StepKind.VIDEO_MASTER, StepKind.QC_REPORT}),
-        ),
-        StepKind.CHANNEL_PACKAGE: (
-            ArtifactKind.CHANNEL_PACKAGE,
-            "channel/package",
-            StepTrigger.APPROVAL,
-            frozenset({StepKind.REVIEW_BUNDLE}),
-        ),
-    }
-    for step in definition.steps:
-        output_kind, logical_key, trigger, dependencies = expected[step.kind]
-        if (
-            step.outputs[0].kind is not output_kind
-            or step.outputs[0].logical_key != logical_key
-            or step.trigger is not trigger
-            or frozenset(binding.source_step for binding in step.inputs) != dependencies
-        ):
-            raise ValueError(f"short_video_v1 step {step.kind} differs from the frozen topology")
+    if definition_digest(definition) != _SHORT_VIDEO_V1_GOLDEN_SHA256:
+        raise ValueError("short_video_v1 differs from the complete frozen definition")
 
 
 def _thaw_json(value: FrozenJsonValue) -> object:
@@ -419,16 +448,24 @@ def canonical_step_request_hash(spec: StepRunSpec) -> str:
     payload = {
         "input_refs": [
             {
-                "artifact_id": str(ref.artifact_id),
-                "kind": ref.kind.value,
-                "logical_key": ref.logical_key,
-                "sha256": ref.sha256,
-                "version": ref.version,
+                "binding": item.binding_name,
+                "artifact_id": str(item.artifact.artifact_id),
+                "kind": item.artifact.kind.value,
+                "logical_key": item.artifact.logical_key,
+                "sha256": item.artifact.sha256,
+                "version": item.artifact.version,
             }
-            for ref in spec.input_refs
+            for item in spec.input_refs
         ],
-        "output_kind": spec.output_kind.value,
-        "output_logical_key": spec.output_logical_key,
+        "outputs": [
+            {
+                "item_key": item.item_key,
+                "kind": item.kind.value,
+                "logical_key": item.logical_key,
+                "slot": item.slot_name,
+            }
+            for item in spec.outputs
+        ],
         "parameters": {key: _thaw_json(value) for key, value in spec.parameters.items()},
         "pipeline_run_id": str(spec.pipeline_run_id),
         "profile_version": spec.profile_version,
@@ -437,54 +474,95 @@ def canonical_step_request_hash(spec: StepRunSpec) -> str:
         "step_version": spec.step_version,
     }
     content = json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True
+    ).encode()
     return hashlib.sha256(content).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
-class StepExecutionRequest:
+class StepProductionRequest:
     step_run_id: UUID
     spec: StepRunSpec
-    output_artifact_id: UUID
-    output_version: int
+    reservations: tuple[StepOutputReservation, ...]
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.output_version, bool)
-            or not isinstance(self.output_version, int)
-            or self.output_version < 1
-        ):
-            raise ValueError("output_version must be a positive integer")
+        reservations = tuple(self.reservations)
+        if tuple(item.output for item in reservations) != self.spec.outputs:
+            raise ValueError("production reservations must exactly match StepRunSpec outputs")
+        object.__setattr__(self, "reservations", reservations)
 
 
 @dataclass(frozen=True, slots=True)
 class ProducedArtifact:
+    reservation: StepOutputReservation
     artifact: Artifact
-    logical_key: str
 
     def __post_init__(self) -> None:
-        validate_logical_key(self.logical_key)
+        expected = (
+            self.reservation.artifact_id,
+            self.reservation.version,
+            self.reservation.output.kind,
+        )
+        actual = (self.artifact.ref.artifact_id, self.artifact.ref.version, self.artifact.ref.kind)
+        if actual != expected:
+            raise ValueError("produced Artifact does not match its reservation")
 
     @property
     def ref(self) -> LogicalArtifactRef:
-        return LogicalArtifactRef(self.artifact.ref, self.logical_key)
+        return LogicalArtifactRef(self.artifact.ref, self.reservation.output.logical_key)
 
 
 @dataclass(frozen=True, slots=True)
-class StepExecutionResult:
+class StepProductionResult:
     artifacts: tuple[ProducedArtifact, ...]
 
     def __post_init__(self) -> None:
         artifacts = tuple(self.artifacts)
-        if len(artifacts) != 1:
-            raise ValueError("step result must contain exactly one reserved produced artifact")
+        if not artifacts:
+            raise ValueError("production result must not be empty")
         object.__setattr__(self, "artifacts", artifacts)
 
+    def validate_against_request(self, request: StepProductionRequest) -> None:
+        expected = {(r.artifact_id, r.version, r.output.logical_key) for r in request.reservations}
+        actual = {
+            (a.reservation.artifact_id, a.reservation.version, a.reservation.output.logical_key)
+            for a in self.artifacts
+        }
+        if actual != expected or len(actual) != len(self.artifacts):
+            raise ValueError("production result must exactly satisfy every request reservation")
 
-class StepHandler(Protocol):
-    def __call__(self, request: StepExecutionRequest) -> StepExecutionResult: ...
+
+@dataclass(frozen=True, slots=True)
+class LeasedStepContext:
+    step_run_id: UUID
+    job_id: UUID
+    worker_id: str
+    lease_expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.worker_id.strip() or len(self.worker_id) > 128:
+            raise ValueError("worker_id must contain 1 to 128 characters")
+        if self.lease_expires_at.tzinfo is None or self.lease_expires_at.utcoffset() is None:
+            raise ValueError("lease_expires_at must be timezone-aware")
+        object.__setattr__(self, "lease_expires_at", self.lease_expires_at.astimezone(UTC))
+
+
+class StepProducer(Protocol):
+    def __call__(self, request: StepProductionRequest) -> StepProductionResult: ...
+
+
+class StepTerminalPort(Protocol):
+    def succeed(self, context: LeasedStepContext, result: StepProductionResult) -> None: ...
+
+    def fail_permanently(self, context: LeasedStepContext, error_class: str) -> None: ...
+
+
+class LeasedStepTerminalHandler(Protocol):
+    """Owns exactly one terminal port call; Worker must not terminalize after return."""
+
+    def __call__(
+        self,
+        context: LeasedStepContext,
+        request: StepProductionRequest,
+        terminal: StepTerminalPort,
+    ) -> None: ...

@@ -20,13 +20,20 @@ from packages.domain.models import (
     SourceKind,
 )
 from packages.domain.pipeline import (
+    BoundArtifactRef,
     LogicalArtifactRef,
     PipelineRun,
     PipelineRunStatus,
     StepKind,
+    StepOutputReservation,
+    StepOutputSpec,
     StepRun,
     StepRunSpec,
     StepRunStatus,
+    retry_step_run,
+    transition_pipeline_run,
+    transition_step_run,
+    validate_step_rerun,
 )
 from packages.domain.repositories import (
     ArtifactRepository,
@@ -47,6 +54,7 @@ __all__ = [
     "ArtifactKind",
     "ArtifactRef",
     "ArtifactRepository",
+    "BoundArtifactRef",
     "ConcurrentUpdateError",
     "ContentProject",
     "DomainError",
@@ -71,8 +79,14 @@ __all__ = [
     "SourceKind",
     "SourceRepository",
     "StepKind",
+    "StepOutputReservation",
+    "StepOutputSpec",
     "StepRun",
     "StepRunSpec",
     "StepRunStatus",
+    "transition_pipeline_run",
+    "retry_step_run",
     "transition_project",
+    "transition_step_run",
+    "validate_step_rerun",
 ]
