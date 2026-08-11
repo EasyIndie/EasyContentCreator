@@ -26,8 +26,8 @@ ruff format .
 POSTGRES_PASSWORD=validation-only ./scripts/verify.sh
 ```
 
-本地未安装 Ruff、Mypy 或 Pytest 时，验证脚本沿用可选工具语义并跳过缺失工具；CI 会安装开发依赖，
-因此提交前应按本地开发手册安装完整工具链，不能将本地跳过视为 CI 已通过。
+统一验证要求当前 worktree 的完整 Python 工具链；Ruff、Mypy 或 Pytest 缺失、外部 editable 导入污染
+或模块不属于当前 worktree 时会立即失败，不会静默跳过。提交前应按本地开发手册安装完整工具链。
 
 ## 每周校准
 
