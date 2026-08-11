@@ -2,8 +2,12 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 
 import {
   ApiError,
+  ArtifactEvidence,
   createProject,
   generateProject,
+  EvidenceSource,
+  getArtifactEvidence,
+  getEvidenceSource,
   getHealth,
   getProject,
   getVersion,
@@ -17,6 +21,12 @@ import {
 
 type ListState = 'loading' | 'empty' | 'error' | 'content'
 type JobsState = 'idle' | 'loading' | 'empty' | 'error' | 'content'
+type EvidenceState = 'idle' | 'loading' | 'empty' | 'not-found' | 'error' | 'content'
+
+type LoadedEvidence = {
+  artifact: ArtifactEvidence
+  sources: Map<string, EvidenceSource>
+}
 
 function aborted(reason: unknown): boolean {
   return reason instanceof DOMException && reason.name === 'AbortError'
@@ -46,9 +56,12 @@ export function App() {
   const [budgetUnits, setBudgetUnits] = useState('1000')
   const [recovering, setRecovering] = useState(false)
   const [recoveryFeedback, setRecoveryFeedback] = useState<string | null>(null)
+  const [evidenceState, setEvidenceState] = useState<EvidenceState>('idle')
+  const [evidence, setEvidence] = useState<LoadedEvidence | null>(null)
   const createFeedbackRef = useRef<HTMLParagraphElement>(null)
   const reviewFeedbackRef = useRef<HTMLParagraphElement>(null)
   const recoveryFeedbackRef = useRef<HTMLParagraphElement>(null)
+  const detailRequestRef = useRef(0)
 
   const replaceProject = (project: Project) => {
     setProjects((current) => {
@@ -58,26 +71,68 @@ export function App() {
     setSelected(project)
   }
 
-  const loadDetail = async (projectId: string, signal?: AbortSignal) => {
-    setDetailLoading(true)
-    setDetailError(false)
+  const loadEvidence = async (project: Project, requestId: number, signal?: AbortSignal) => {
+    const factCard = project.current_artifacts.fact_card
+    setEvidence(null)
+    if (!factCard) {
+      if (detailRequestRef.current === requestId) setEvidenceState('empty')
+      return
+    }
+    setEvidenceState('loading')
     try {
-      replaceProject(await getProject(projectId, signal))
-      setJobsState('loading')
-      try {
-        const items = await listProjectJobs(projectId, signal)
-        setJobs(items)
-        setJobsState(items.length === 0 ? 'empty' : 'content')
-      } catch (reason) {
-        if (!aborted(reason)) {
-          setJobs([])
-          setJobsState('error')
-        }
+      const artifact = await getArtifactEvidence(
+        project.id,
+        factCard.artifact_id,
+        factCard.version,
+        signal,
+      )
+      const sourceIds = [...new Set(artifact.citations.map((item) => item.source_id))]
+      const sources = await Promise.all(
+        sourceIds.map((sourceId) => getEvidenceSource(sourceId, signal)),
+      )
+      if (detailRequestRef.current === requestId) {
+        setEvidence({ artifact, sources: new Map(sources.map((source) => [source.id, source])) })
+        setEvidenceState('content')
       }
     } catch (reason) {
-      if (!aborted(reason)) setDetailError(true)
+      if (!aborted(reason) && detailRequestRef.current === requestId) {
+        setEvidenceState(reason instanceof ApiError && reason.status === 404 ? 'not-found' : 'error')
+      }
+    }
+  }
+
+  const loadDetail = async (projectId: string, signal?: AbortSignal) => {
+    const requestId = detailRequestRef.current + 1
+    detailRequestRef.current = requestId
+    setDetailLoading(true)
+    setDetailError(false)
+    setEvidence(null)
+    setEvidenceState('idle')
+    try {
+      const project = await getProject(projectId, signal)
+      if (detailRequestRef.current !== requestId) return
+      replaceProject(project)
+      setJobsState('loading')
+      await Promise.all([
+        loadEvidence(project, requestId, signal),
+        listProjectJobs(projectId, signal)
+          .then((items) => {
+            if (detailRequestRef.current === requestId) {
+              setJobs(items)
+              setJobsState(items.length === 0 ? 'empty' : 'content')
+            }
+          })
+          .catch((reason: unknown) => {
+            if (!aborted(reason) && detailRequestRef.current === requestId) {
+              setJobs([])
+              setJobsState('error')
+            }
+          }),
+      ])
+    } catch (reason) {
+      if (!aborted(reason) && detailRequestRef.current === requestId) setDetailError(true)
     } finally {
-      setDetailLoading(false)
+      if (detailRequestRef.current === requestId) setDetailLoading(false)
     }
   }
 
@@ -123,9 +178,12 @@ export function App() {
     setCreateFeedback(null)
     try {
       const created = await createProject(title)
+      detailRequestRef.current += 1
       replaceProject(created)
       setJobs([])
       setJobsState('empty')
+      setEvidence(null)
+      setEvidenceState('empty')
       setListState('content')
       setTitle('')
       setCreateFeedback('项目已创建。')
@@ -138,7 +196,7 @@ export function App() {
 
   const submitReview = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!selected || reviewing) return
+    if (!selected || reviewing || evidenceState !== 'content') return
     setReviewing(true)
     setReviewFeedback(null)
     try {
@@ -330,6 +388,24 @@ export function App() {
               )}
             </section>
 
+            <section className="evidence" aria-labelledby="evidence-heading">
+              <h4 id="evidence-heading">事实卡片证据</h4>
+              {evidenceState === 'idle' && <p>请选择项目以加载证据。</p>}
+              {evidenceState === 'loading' && <p role="status">正在加载证据链…</p>}
+              {evidenceState === 'empty' && (
+                <p role="alert">当前项目没有 FACT_CARD，不能完成审核。</p>
+              )}
+              {evidenceState === 'not-found' && (
+                <p role="alert">证据不存在或无权访问，不能完成审核。</p>
+              )}
+              {evidenceState === 'error' && (
+                <p role="alert">证据链 unavailable，不能完成审核。</p>
+              )}
+              {evidenceState === 'content' && evidence && (
+                <EvidenceReview evidence={evidence} />
+              )}
+            </section>
+
             {selected.status === 'review_required' && (
               <form onSubmit={submitReview} aria-labelledby="review-heading">
                 <h4 id="review-heading">人工审核</h4>
@@ -364,7 +440,14 @@ export function App() {
                   required
                   maxLength={2000}
                 />
-                <button type="submit" disabled={reviewing}>
+                {evidenceState !== 'content' && (
+                  <p id="review-evidence-help">证据加载成功后才能提交审核。</p>
+                )}
+                <button
+                  type="submit"
+                  disabled={reviewing || evidenceState !== 'content'}
+                  aria-describedby={evidenceState === 'content' ? undefined : 'review-evidence-help'}
+                >
                   {reviewing ? '提交中…' : '提交审核'}
                 </button>
               </form>
@@ -378,5 +461,76 @@ export function App() {
         )}
       </section>
     </main>
+  )
+}
+
+function EvidenceReview({ evidence }: { evidence: LoadedEvidence }) {
+  const { artifact, sources } = evidence
+  if (artifact.citations.length === 0) {
+    return <p role="alert">FACT_CARD 没有 citation，请勿批准。</p>
+  }
+
+  return (
+    <div>
+      <p role="status">证据链已加载，共 {artifact.citations.length} 条引用。</p>
+      <dl className="artifact-summary">
+        <dt>Artifact SHA</dt>
+        <dd>
+          <code className="sha-full">{artifact.sha256}</code>
+        </dd>
+        <dt>生成能力</dt>
+        <dd>{artifact.metadata.capability ?? '未记录'}</dd>
+        <dt>模板版本</dt>
+        <dd>{artifact.metadata.template_version ?? '未记录'}</dd>
+      </dl>
+      <ol className="citation-list">
+        {artifact.citations.map((citation, index) => {
+          const source = sources.get(citation.source_id)
+          const excerpt = source?.excerpts.find((item) => item.id === citation.excerpt_id)
+          const digestMatches = source?.sha256 === citation.source_sha256
+          const headingId = `citation-${index + 1}`
+          return (
+            <li key={`${citation.source_id}-${citation.excerpt_id}-${index}`}>
+              <article className="citation-card" aria-labelledby={headingId}>
+                <h5 id={headingId}>引用 {index + 1} · {source?.title ?? 'Source 缺失'}</h5>
+                {!source || !excerpt ? (
+                  <p role="alert">引用无法定位到对应 Source/excerpt，请勿批准。</p>
+                ) : (
+                  <>
+                    <dl>
+                      <dt>Source kind</dt>
+                      <dd>{source.kind}</dd>
+                      <dt>来源 URI</dt>
+                      <dd>
+                        <a href={source.uri} target="_blank" rel="noreferrer">
+                          {source.uri}
+                        </a>
+                      </dd>
+                      <dt>Source SHA 短标识</dt>
+                      <dd>{source.sha256.slice(0, 12)}</dd>
+                      <dt>Source SHA 完整值</dt>
+                      <dd><code className="sha-full">{source.sha256}</code></dd>
+                      <dt>摘要</dt>
+                      <dd>{source.summary}</dd>
+                    </dl>
+                    {!digestMatches && (
+                      <p role="alert" className="warning">
+                        摘要不一致：citation 快照 {citation.source_sha256.slice(0, 12)}，当前 Source{' '}
+                        {source.sha256.slice(0, 12)}。请勿批准。
+                      </p>
+                    )}
+                    <div id={`excerpt-${excerpt.id}`} className="excerpt" tabIndex={-1}>
+                      <p><strong>Excerpt</strong>{excerpt.locator ? ` · ${excerpt.locator}` : ''}</p>
+                      <blockquote>{excerpt.text}</blockquote>
+                    </div>
+                    <a href={`#excerpt-${excerpt.id}`}>定位到 excerpt</a>
+                  </>
+                )}
+              </article>
+            </li>
+          )
+        })}
+      </ol>
+    </div>
   )
 }

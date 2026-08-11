@@ -32,3 +32,22 @@ button:disabled { cursor: wait; opacity: 0.65; }
 dt { font-weight: 700; }
 dd { margin: 0 0 0.5rem; }
 fieldset { display: flex; gap: 1rem; }
+.evidence { margin: 1rem 0; padding: 1rem; border: 1px solid #cbd8d0; }
+.artifact-summary, .citation-card dl { min-width: 0; }
+.citation-list { display: grid; gap: 1rem; padding-left: 1.5rem; }
+.citation-card { min-width: 0; padding: 1rem; border: 1px solid #dce5df; border-radius: 0.5rem; }
+.citation-card h5 { margin-top: 0; font-size: 1rem; }
+.citation-card a { overflow-wrap: anywhere; }
+.sha-full { display: block; max-width: 100%; overflow-wrap: anywhere; user-select: all; }
+.warning { padding: 0.75rem; border-left: 0.25rem solid #b45309; background: #fff7ed; }
+.excerpt { margin: 0.75rem 0; padding: 0.75rem; background: #f3f7f2; }
+.excerpt p { margin-top: 0; }
+.excerpt blockquote { margin: 0; white-space: pre-wrap; }
+
+@media (max-width: 40rem) {
+  main { padding: 1rem; }
+  section { padding: 1rem; }
+  fieldset { align-items: flex-start; flex-direction: column; }
+  .citation-list { padding-left: 1.25rem; }
+  .citation-card { padding: 0.75rem; }
+}

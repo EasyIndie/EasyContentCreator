@@ -48,6 +48,53 @@ const baseJob: Job = {
   recoverable: true,
 }
 
+const sourceA = {
+  id: 'source-1',
+  kind: 'official_documentation',
+  title: '官方文档',
+  uri: 'https://example.test/docs',
+  retrieved_at: '2026-08-09T11:00:00Z',
+  sha256: 'b'.repeat(64),
+  summary: '官方摘要',
+  excerpts: [
+    { id: 'excerpt-1', text: '第一条事实', locator: 'section-1' },
+    { id: 'excerpt-2', text: '第二条事实', locator: 'section-2' },
+  ],
+}
+
+const sourceB = {
+  id: 'source-2',
+  kind: 'research_paper',
+  title: '研究论文',
+  uri: 'https://example.test/paper',
+  retrieved_at: '2026-08-09T11:30:00Z',
+  sha256: 'c'.repeat(64),
+  summary: '论文摘要',
+  excerpts: [{ id: 'excerpt-3', text: '第三条事实', locator: null }],
+}
+
+const baseEvidence = {
+  artifact_id: 'artifact-1',
+  version: 1,
+  kind: 'fact_card',
+  sha256: 'a'.repeat(64),
+  project_id: 'project-1',
+  created_at: '2026-08-09T12:00:00Z',
+  created_by: 'worker',
+  adapter: 'fake',
+  metadata: {
+    capability: 'fact_card',
+    template_version: 'facts-v1',
+    parameters: { source_ids: ['source-1', 'source-2'] },
+  },
+  upstream: [],
+  citations: [
+    { source_id: 'source-1', excerpt_id: 'excerpt-1', source_sha256: sourceA.sha256 },
+    { source_id: 'source-1', excerpt_id: 'excerpt-2', source_sha256: sourceA.sha256 },
+    { source_id: 'source-2', excerpt_id: 'excerpt-3', source_sha256: sourceB.sha256 },
+  ],
+}
+
 function json(body: unknown, status = 200): Promise<Response> {
   return Promise.resolve(new Response(JSON.stringify(body), { status }))
 }
@@ -62,6 +109,15 @@ function standardFetch(projects: Project[] = []) {
     if (url.endsWith('/projects')) return json({ items: projects })
     throw new Error(`unexpected request: ${url}`)
   })
+}
+
+function evidenceFetch(url: string, evidence = baseEvidence): Promise<Response> | undefined {
+  if (url.includes('/artifacts/artifact-1/versions/1?project_id=project-1')) {
+    return json(evidence)
+  }
+  if (url.endsWith('/sources/source-1')) return json(sourceA)
+  if (url.endsWith('/sources/source-2')) return json(sourceB)
+  return undefined
 }
 
 test('renders loading then empty state with health and version', async () => {
@@ -181,6 +237,8 @@ test.each([
         detailCalls += 1
         return json(detailCalls === 1 ? baseProject : reviewed)
       }
+      const evidenceResponse = evidenceFetch(url)
+      if (evidenceResponse) return evidenceResponse
       throw new Error(`unexpected request: ${url}`)
     }),
   )
@@ -188,6 +246,7 @@ test.each([
   render(<App />)
   fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
   await screen.findByRole('heading', { name: '人工审核' })
+  await screen.findByText('证据链已加载，共 3 条引用。')
   fireEvent.click(screen.getByLabelText(decisionLabel))
   fireEvent.change(screen.getByLabelText('审核说明'), { target: { value: '来源已核对' } })
   fireEvent.click(screen.getByRole('button', { name: '提交审核' }))
@@ -433,6 +492,8 @@ test('refreshes details and explains a revision conflict', async () => {
         detailCalls += 1
         return json(detailCalls === 1 ? baseProject : refreshed)
       }
+      const evidenceResponse = evidenceFetch(url)
+      if (evidenceResponse) return evidenceResponse
       throw new Error(`unexpected request: ${url}`)
     }),
   )
@@ -440,11 +501,12 @@ test('refreshes details and explains a revision conflict', async () => {
   render(<App />)
   fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
   await screen.findByRole('heading', { name: '人工审核' })
+  await screen.findByText('证据链已加载，共 3 条引用。')
   fireEvent.change(screen.getByLabelText('审核说明'), { target: { value: '核对完成' } })
   fireEvent.click(screen.getByRole('button', { name: '提交审核' }))
 
   const conflict = await screen.findByText('项目已更新，请刷新后重试')
-  expect(conflict).toHaveFocus()
+  await waitFor(() => expect(conflict).toHaveFocus())
   expect(await screen.findByText('generating')).toBeInTheDocument()
   expect(screen.getByText('2')).toBeInTheDocument()
   expect(detailCalls).toBe(2)
@@ -470,6 +532,8 @@ test('disables review submission to prevent duplicate requests', async () => {
         return pendingReview
       }
       if (url.endsWith('/projects/project-1')) return json(baseProject)
+      const evidenceResponse = evidenceFetch(url)
+      if (evidenceResponse) return evidenceResponse
       throw new Error(`unexpected request: ${url}`)
     }),
   )
@@ -477,6 +541,7 @@ test('disables review submission to prevent duplicate requests', async () => {
   render(<App />)
   fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
   await screen.findByRole('heading', { name: '人工审核' })
+  await screen.findByText('证据链已加载，共 3 条引用。')
   fireEvent.change(screen.getByLabelText('审核说明'), { target: { value: '核对完成' } })
   fireEvent.click(screen.getByRole('button', { name: '提交审核' }))
   const submitting = await screen.findByRole('button', { name: '提交中…' })
@@ -498,4 +563,177 @@ test('disables review submission to prevent duplicate requests', async () => {
     ),
   )
   await waitFor(() => expect(screen.queryByText('提交中…')).not.toBeInTheDocument())
+})
+
+test('renders multiple sources and locates each citation excerpt', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.endsWith('/health/live')) {
+        return json({ status: 'ok', environment: 'test', database: 'not_checked' })
+      }
+      if (url.endsWith('/version')) return json({ version: '0.1.0', commit: 'abc123' })
+      if (url.endsWith('/projects')) return json({ items: [baseProject] })
+      if (url.endsWith('/projects/project-1/jobs')) {
+        return json({
+          items: [
+            {
+              ...baseJob,
+              id: 'job-visible-with-evidence',
+              status: 'succeeded',
+              attempt: 1,
+              error_class: null,
+              recoverable: false,
+            },
+          ],
+        })
+      }
+      if (url.endsWith('/projects/project-1')) return json(baseProject)
+      const evidenceResponse = evidenceFetch(url)
+      if (evidenceResponse) return evidenceResponse
+      throw new Error(`unexpected request: ${url}`)
+    }),
+  )
+
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
+
+  expect(await screen.findByText('证据链已加载，共 3 条引用。')).toBeInTheDocument()
+  expect(screen.getAllByRole('link', { name: sourceA.uri })).toHaveLength(2)
+  expect(screen.getByRole('link', { name: sourceB.uri })).toHaveAttribute('href', sourceB.uri)
+  expect(screen.getByText('第一条事实')).toBeInTheDocument()
+  expect(screen.getByText('第二条事实')).toBeInTheDocument()
+  expect(screen.getByText('第三条事实')).toBeInTheDocument()
+  expect(screen.getAllByRole('link', { name: '定位到 excerpt' })).toHaveLength(3)
+  expect(screen.getAllByText(sourceA.sha256).length).toBeGreaterThan(0)
+  expect(screen.getByText(/succeeded · attempt 1\/3/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '提交审核' })).toBeEnabled()
+})
+
+test('shows a fail-closed warning when the fact card has no citations', async () => {
+  const withoutCitations = { ...baseEvidence, citations: [] }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.endsWith('/health/live')) {
+        return json({ status: 'ok', environment: 'test', database: 'not_checked' })
+      }
+      if (url.endsWith('/version')) return json({ version: '0.1.0', commit: 'abc123' })
+      if (url.endsWith('/projects')) return json({ items: [baseProject] })
+      if (url.endsWith('/projects/project-1')) return json(baseProject)
+      const evidenceResponse = evidenceFetch(url, withoutCitations)
+      if (evidenceResponse) return evidenceResponse
+      throw new Error(`unexpected request: ${url}`)
+    }),
+  )
+
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
+
+  expect(await screen.findByText('FACT_CARD 没有 citation，请勿批准。')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '提交审核' })).toBeEnabled()
+})
+
+test('warns when a citation digest differs from the current source digest', async () => {
+  const mismatch = {
+    ...baseEvidence,
+    citations: [
+      { ...baseEvidence.citations[0], source_sha256: 'd'.repeat(64) },
+    ],
+  }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.endsWith('/health/live')) {
+        return json({ status: 'ok', environment: 'test', database: 'not_checked' })
+      }
+      if (url.endsWith('/version')) return json({ version: '0.1.0', commit: 'abc123' })
+      if (url.endsWith('/projects')) return json({ items: [baseProject] })
+      if (url.endsWith('/projects/project-1')) return json(baseProject)
+      const evidenceResponse = evidenceFetch(url, mismatch)
+      if (evidenceResponse) return evidenceResponse
+      throw new Error(`unexpected request: ${url}`)
+    }),
+  )
+
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
+
+  expect(await screen.findByText(/摘要不一致：citation 快照/)).toHaveAttribute('role', 'alert')
+})
+
+test('keeps review disabled when evidence loading fails', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.endsWith('/health/live')) {
+        return json({ status: 'ok', environment: 'test', database: 'not_checked' })
+      }
+      if (url.endsWith('/version')) return json({ version: '0.1.0', commit: 'abc123' })
+      if (url.endsWith('/projects')) return json({ items: [baseProject] })
+      if (url.endsWith('/projects/project-1')) return json(baseProject)
+      if (url.includes('/artifacts/artifact-1/versions/1')) {
+        return Promise.reject(new Error('network unavailable'))
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }),
+  )
+
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
+
+  expect(await screen.findByText('证据链 unavailable，不能完成审核。')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '提交审核' })).toBeDisabled()
+})
+
+test('distinguishes a missing or inaccessible artifact from a network error', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.endsWith('/health/live')) {
+        return json({ status: 'ok', environment: 'test', database: 'not_checked' })
+      }
+      if (url.endsWith('/version')) return json({ version: '0.1.0', commit: 'abc123' })
+      if (url.endsWith('/projects')) return json({ items: [baseProject] })
+      if (url.endsWith('/projects/project-1')) return json(baseProject)
+      if (url.includes('/artifacts/artifact-1/versions/1')) {
+        return json({ detail: { code: 'not_found', message: 'artifact not found' } }, 404)
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }),
+  )
+
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
+
+  expect(await screen.findByText('证据不存在或无权访问，不能完成审核。')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '提交审核' })).toBeDisabled()
+})
+
+test('shows empty evidence and keeps review disabled without a fact card', async () => {
+  const withoutFactCard = { ...baseProject, current_artifacts: {} }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.endsWith('/health/live')) {
+        return json({ status: 'ok', environment: 'test', database: 'not_checked' })
+      }
+      if (url.endsWith('/version')) return json({ version: '0.1.0', commit: 'abc123' })
+      if (url.endsWith('/projects')) return json({ items: [withoutFactCard] })
+      if (url.endsWith('/projects/project-1')) return json(withoutFactCard)
+      throw new Error(`unexpected request: ${url}`)
+    }),
+  )
+
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /AI 事实卡片/ }))
+
+  expect(await screen.findByText('当前项目没有 FACT_CARD，不能完成审核。')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '提交审核' })).toBeDisabled()
 })
