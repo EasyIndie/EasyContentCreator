@@ -1,5 +1,24 @@
 """Pipeline orchestration, validation, and leased Job execution."""
 
+from packages.pipeline.contracts import (
+    SHORT_VIDEO_PIPELINE_KIND,
+    SHORT_VIDEO_PIPELINE_VERSION,
+    SHORT_VIDEO_PROFILE_VERSION,
+    ArtifactSlotDefinition,
+    PipelineDefinition,
+    ProducedArtifact,
+    StepDefinition,
+    StepExecutionRequest,
+    StepExecutionResult,
+    StepInputDefinition,
+    StepTrigger,
+    canonical_step_request_hash,
+    short_video_v1_definition,
+    validate_short_video_v1,
+)
+from packages.pipeline.contracts import (
+    StepHandler as PipelineStepHandler,
+)
 from packages.pipeline.evidence import (
     EvidenceIssue,
     EvidenceIssueCode,
@@ -30,6 +49,7 @@ from packages.pipeline.jobs import (
 )
 
 __all__ = [
+    "ArtifactSlotDefinition",
     "EvidenceIssue",
     "EvidenceIssueCode",
     "EvidenceReport",
@@ -48,8 +68,22 @@ __all__ = [
     "JobStore",
     "JobView",
     "LostLeaseError",
+    "PipelineDefinition",
+    "PipelineStepHandler",
+    "ProducedArtifact",
+    "SHORT_VIDEO_PIPELINE_KIND",
+    "SHORT_VIDEO_PIPELINE_VERSION",
+    "SHORT_VIDEO_PROFILE_VERSION",
+    "StepDefinition",
+    "StepExecutionRequest",
+    "StepExecutionResult",
+    "StepInputDefinition",
+    "StepTrigger",
     "canonical_request_hash",
+    "canonical_step_request_hash",
     "citations_for_sources",
     "fact_card_artifact_id",
+    "short_video_v1_definition",
+    "validate_short_video_v1",
     "validate_artifact_evidence",
 ]

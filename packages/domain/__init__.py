@@ -19,6 +19,15 @@ from packages.domain.models import (
     SourceExcerpt,
     SourceKind,
 )
+from packages.domain.pipeline import (
+    LogicalArtifactRef,
+    PipelineRun,
+    PipelineRunStatus,
+    StepKind,
+    StepRun,
+    StepRunSpec,
+    StepRunStatus,
+)
 from packages.domain.repositories import (
     ArtifactRepository,
     ConcurrentUpdateError,
@@ -45,7 +54,10 @@ __all__ = [
     "FailedStage",
     "InvalidStateTransition",
     "ImmutableConflictError",
+    "LogicalArtifactRef",
     "PermanentError",
+    "PipelineRun",
+    "PipelineRunStatus",
     "ProjectStatus",
     "ProjectRepository",
     "RepositoryError",
@@ -58,5 +70,9 @@ __all__ = [
     "SourceExcerpt",
     "SourceKind",
     "SourceRepository",
+    "StepKind",
+    "StepRun",
+    "StepRunSpec",
+    "StepRunStatus",
     "transition_project",
 ]

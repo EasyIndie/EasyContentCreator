@@ -39,9 +39,18 @@ class SourceKind(StrEnum):
 
 
 class ArtifactKind(StrEnum):
+    SOURCE = "source"
     FACT_CARD = "fact_card"
+    TOPIC_BRIEF = "topic_brief"
     SCRIPT = "script"
     STORYBOARD = "storyboard"
+    ASSET_MANIFEST = "asset_manifest"
+    VOICEOVER = "voiceover"
+    SUBTITLES = "subtitles"
+    VIDEO_MASTER = "video_master"
+    QC_REPORT = "qc_report"
+    REVIEW_BUNDLE = "review_bundle"
+    CHANNEL_PACKAGE = "channel_package"
     MEDIA = "media"
     AUDIO = "audio"
     SUBTITLE = "subtitle"
@@ -58,7 +67,7 @@ class ArtifactRef:
     sha256: str
 
     def __post_init__(self) -> None:
-        if self.version < 1:
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise ValueError("artifact version must be positive")
         if len(self.sha256) != 64 or any(char not in "0123456789abcdef" for char in self.sha256):
             raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
