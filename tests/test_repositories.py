@@ -55,7 +55,11 @@ def test_migration_is_ordered_and_idempotent(
     migrated_database: tuple[Database, tuple[str, ...]],
 ) -> None:
     database, initially_applied = migrated_database
-    assert initially_applied == ("001_initial.sql", "002_generation_requests.sql")
+    assert initially_applied == (
+        "001_initial.sql",
+        "002_generation_requests.sql",
+        "003_pipeline_runs.sql",
+    )
     assert run_migrations(database) == ()
 
 
@@ -94,7 +98,10 @@ def test_generation_request_migration_preserves_existing_001_data(
             (artifact_id, SHA_A, project_id, NOW),
         )
 
-    assert run_migrations(legacy_database) == ("002_generation_requests.sql",)
+    assert run_migrations(legacy_database) == (
+        "002_generation_requests.sql",
+        "003_pipeline_runs.sql",
+    )
     with legacy_database.connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT title FROM projects WHERE id = %s", (project_id,))
         assert cursor.fetchone() == ("Legacy project",)
