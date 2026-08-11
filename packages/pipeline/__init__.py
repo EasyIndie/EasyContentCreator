@@ -19,6 +19,7 @@ from packages.pipeline.contracts import (
     StepTrigger,
     canonical_step_request_hash,
     definition_digest,
+    definition_manifest,
     short_video_v1_definition,
     validate_short_video_v1,
 )
@@ -50,6 +51,14 @@ from packages.pipeline.jobs import (
     JobView,
     LostLeaseError,
 )
+from packages.pipeline.persistence import (
+    PIPELINE_STEP_JOB_KIND,
+    PipelineDefinitionRecord,
+    PipelineDefinitionRepository,
+    PipelineRunRepository,
+    StepRunConflict,
+    StepRunRepository,
+)
 
 __all__ = [
     "ArtifactSlotDefinition",
@@ -74,7 +83,11 @@ __all__ = [
     "LeasedStepContext",
     "LeasedStepTerminalHandler",
     "OutputCardinality",
+    "PIPELINE_STEP_JOB_KIND",
     "PipelineDefinition",
+    "PipelineDefinitionRecord",
+    "PipelineDefinitionRepository",
+    "PipelineRunRepository",
     "ProducedArtifact",
     "SHORT_VIDEO_PIPELINE_KIND",
     "SHORT_VIDEO_PIPELINE_VERSION",
@@ -84,12 +97,15 @@ __all__ = [
     "StepProducer",
     "StepProductionRequest",
     "StepProductionResult",
+    "StepRunConflict",
+    "StepRunRepository",
     "StepTerminalPort",
     "StepTrigger",
     "canonical_request_hash",
     "canonical_step_request_hash",
     "citations_for_sources",
     "definition_digest",
+    "definition_manifest",
     "fact_card_artifact_id",
     "short_video_v1_definition",
     "validate_short_video_v1",

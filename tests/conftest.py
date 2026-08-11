@@ -32,6 +32,14 @@ def migrated_database() -> Iterator[tuple[Database, tuple[str, ...]]]:
     database = Database(_schema_url(database_url, schema))
     try:
         applied = run_migrations(database)
+        with database.connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE artifact_kind_activation
+                SET m2_enabled = TRUE, enabled_at = CURRENT_TIMESTAMP
+                WHERE singleton AND NOT m2_enabled
+                """
+            )
         yield database, applied
     finally:
         if not schema.startswith("ecc_test_"):

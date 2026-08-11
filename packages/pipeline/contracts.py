@@ -441,7 +441,7 @@ def short_video_v1_definition() -> PipelineDefinition:
     return definition
 
 
-def _definition_manifest(definition: PipelineDefinition) -> object:
+def definition_manifest(definition: PipelineDefinition) -> object:
     return {
         "external_inputs": [
             (s.name, s.kind.value, s.logical_key_template, s.cardinality.value, s.allowed_item_keys)
@@ -486,7 +486,7 @@ _SHORT_VIDEO_V1_GOLDEN_SHA256 = "c87371f877aae459b668ee806b2f5e15fad6b0016d6646b
 
 def definition_digest(definition: PipelineDefinition) -> str:
     content = json.dumps(
-        _definition_manifest(definition), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        definition_manifest(definition), ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode()
     return hashlib.sha256(content).hexdigest()
 
