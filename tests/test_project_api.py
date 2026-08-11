@@ -15,6 +15,7 @@ from packages.domain import (
     ArtifactRef,
     ConcurrentUpdateError,
     ContentProject,
+    FailedStage,
     ImmutableConflictError,
     InvalidStateTransition,
     ProjectRepository,
@@ -122,7 +123,7 @@ def test_create_list_and_get_projects(
 
 @pytest.mark.parametrize(
     ("decision", "expected_status"),
-    [("approve", "approved"), ("reject", "generating")],
+    [("approve", "approved"), ("reject", "failed")],
 )
 def test_review_transitions_project_and_records_review(
     api: tuple[TestClient, InMemoryProjectRepository],
@@ -143,6 +144,9 @@ def test_review_transitions_project_and_records_review(
     assert response.json()["project_revision"] == 2
     assert repository.get(project.id).status.value == expected_status
     assert repository.get(project.id).revision == 2
+    assert repository.get(project.id).failed_stage is (
+        None if decision == "approve" else FailedStage.GENERATION
+    )
     assert len(repository.reviews) == 1
 
 
@@ -213,13 +217,31 @@ def test_invalid_note_keeps_fastapi_validation_and_does_not_write_review(
     assert repository.reviews == []
 
 
-def test_repository_review_is_atomic_when_review_insert_fails(database: Database) -> None:
+@pytest.mark.parametrize(
+    ("decision", "target", "failed_stage"),
+    [
+        (ReviewDecision.APPROVE, ProjectStatus.APPROVED, None),
+        (ReviewDecision.REJECT, ProjectStatus.FAILED, FailedStage.GENERATION),
+    ],
+)
+def test_repository_review_is_atomic_when_review_insert_fails(
+    database: Database,
+    decision: ReviewDecision,
+    target: ProjectStatus,
+    failed_stage: FailedStage | None,
+) -> None:
     projects = ProjectRepository(database)
     reviews = ReviewRepository(database)
     project = replace(project_at(ProjectStatus.REVIEW_REQUIRED), current_artifacts={})
     projects.create(project)
-    updated = replace(project, status=ProjectStatus.APPROVED, revision=2, updated_at=NOW)
-    review = Review(uuid4(), project.id, ReviewDecision.APPROVE, "Approved", 2, NOW)
+    updated = replace(
+        project,
+        status=target,
+        failed_stage=failed_stage,
+        revision=2,
+        updated_at=NOW,
+    )
+    review = Review(uuid4(), project.id, decision, "Reviewed", 2, NOW)
     reviews.add(review)
 
     with pytest.raises(ImmutableConflictError):
@@ -232,7 +254,7 @@ def test_repository_review_is_atomic_when_review_insert_fails(database: Database
     ("decision", "target"),
     [
         (ReviewDecision.APPROVE, ProjectStatus.APPROVED),
-        (ReviewDecision.REJECT, ProjectStatus.GENERATING),
+        (ReviewDecision.REJECT, ProjectStatus.FAILED),
     ],
 )
 def test_repository_review_success_on_postgresql(
@@ -249,6 +271,7 @@ def test_repository_review_success_on_postgresql(
         status=target,
         revision=2,
         updated_at=NOW,
+        failed_stage=FailedStage.GENERATION if decision is ReviewDecision.REJECT else None,
     )
     review = Review(uuid4(), project.id, decision, "Reviewed", 2, NOW)
 
@@ -263,12 +286,31 @@ def test_repository_review_success_on_postgresql(
         assert cursor.fetchone() == (decision.value, 2)
 
 
-def test_repository_rejects_review_decision_status_mismatch(database: Database) -> None:
+@pytest.mark.parametrize(
+    ("decision", "status", "failed_stage"),
+    [
+        (ReviewDecision.APPROVE, ProjectStatus.GENERATING, None),
+        (ReviewDecision.APPROVE, ProjectStatus.FAILED, FailedStage.GENERATION),
+        (ReviewDecision.REJECT, ProjectStatus.APPROVED, None),
+        (ReviewDecision.REJECT, ProjectStatus.FAILED, FailedStage.PUBLICATION),
+    ],
+)
+def test_repository_rejects_review_decision_status_mismatch(
+    database: Database,
+    decision: ReviewDecision,
+    status: ProjectStatus,
+    failed_stage: FailedStage | None,
+) -> None:
     projects = ProjectRepository(database)
     project = replace(project_at(ProjectStatus.REVIEW_REQUIRED), current_artifacts={})
     projects.create(project)
-    mismatched = replace(project, status=ProjectStatus.GENERATING, revision=2)
-    review = Review(uuid4(), project.id, ReviewDecision.APPROVE, "Reviewed", 2, NOW)
+    mismatched = replace(
+        project,
+        status=status,
+        failed_stage=failed_stage,
+        revision=2,
+    )
+    review = Review(uuid4(), project.id, decision, "Reviewed", 2, NOW)
 
     with pytest.raises(InvalidStateTransition, match="cannot produce"):
         projects.apply_review(mismatched, review, expected_revision=1)
@@ -284,11 +326,14 @@ def test_concurrent_reviews_only_commit_one_record(database: Database) -> None:
 
     def apply(decision: ReviewDecision) -> str:
         target = (
-            ProjectStatus.APPROVED
-            if decision is ReviewDecision.APPROVE
-            else ProjectStatus.GENERATING
+            ProjectStatus.APPROVED if decision is ReviewDecision.APPROVE else ProjectStatus.FAILED
         )
-        updated = replace(project, status=target, revision=2)
+        updated = replace(
+            project,
+            status=target,
+            revision=2,
+            failed_stage=(FailedStage.GENERATION if decision is ReviewDecision.REJECT else None),
+        )
         review = Review(uuid4(), project.id, decision, "Concurrent review", 2, NOW)
         barrier.wait()
         try:

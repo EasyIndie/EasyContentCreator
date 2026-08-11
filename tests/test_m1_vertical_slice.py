@@ -278,6 +278,105 @@ def test_fake_success_reaches_approved_with_reproducible_evidence(
     assert replay.json()["status"] == "succeeded"
 
 
+def test_rejection_preserves_artifact_and_recovers_only_with_new_key(
+    database: Database,
+    api: tuple[TestClient, dict[str, datetime]],
+    tmp_path: Path,
+) -> None:
+    client, clock = api
+    project = add_project(database, "Reject and recover")
+    source = add_source(database, excerpt_count=2)
+    url = f"/projects/{project.id}/generate"
+    body = request_body(source.id)
+
+    first = client.post(url, headers={"Idempotency-Key": "first-version"}, json=body)
+    first_job = UUID(first.json()["job_id"])
+    first_reservation = GenerationRequestRepository(database).get_by_job_id(first_job)
+    worker(database, tmp_path, clock, worker_id="first-worker").poll_once()
+    review_required = ProjectRepository(database).get(project.id)
+    first_ref = review_required.current_artifacts[ArtifactKind.FACT_CARD]
+    first_artifact = ArtifactRepository(database).get(first_ref.artifact_id, first_ref.version)
+    first_bytes = (tmp_path / first_artifact.storage_path).read_bytes()
+
+    rejected = client.post(
+        f"/projects/{project.id}/reviews",
+        json={
+            "decision": "reject",
+            "note": "Evidence is valid, but the framing needs revision",
+            "expected_revision": review_required.revision,
+        },
+    )
+
+    assert rejected.status_code == 201
+    failed = ProjectRepository(database).get(project.id)
+    assert failed.status is ProjectStatus.FAILED
+    assert failed.failed_stage.value == "generation"
+    assert failed.current_artifacts[ArtifactKind.FACT_CARD] == first_ref
+    assert (
+        ArtifactRepository(database).get(first_ref.artifact_id, first_ref.version) == first_artifact
+    )
+    assert (tmp_path / first_artifact.storage_path).read_bytes() == first_bytes
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM jobs WHERE project_id = %s", (project.id,))
+        assert cursor.fetchone() == (1,)
+        cursor.execute(
+            "SELECT decision, project_revision FROM reviews WHERE project_id = %s",
+            (project.id,),
+        )
+        assert cursor.fetchall() == [("reject", failed.revision)]
+
+    replay = client.post(url, headers={"Idempotency-Key": "first-version"}, json=body)
+    assert replay.status_code == 202
+    assert replay.json() == {
+        "job_id": str(first_job),
+        "project_id": str(project.id),
+        "status": "succeeded",
+    }
+    assert ProjectRepository(database).get(project.id).status is ProjectStatus.FAILED
+
+    conflicting_body = {**body, "template_version": "fact-card-v2"}
+    conflict = client.post(
+        url,
+        headers={"Idempotency-Key": "first-version"},
+        json=conflicting_body,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "detail": {
+            "code": "idempotency_conflict",
+            "message": "Idempotency-Key was already used with a different request",
+        }
+    }
+    assert ProjectRepository(database).get(project.id).status is ProjectStatus.FAILED
+
+    clock["now"] += timedelta(seconds=1)
+    recovery = client.post(url, headers={"Idempotency-Key": "second-version"}, json=body)
+    second_job = UUID(recovery.json()["job_id"])
+    second_reservation = GenerationRequestRepository(database).get_by_job_id(second_job)
+    assert second_reservation.artifact_id == first_reservation.artifact_id
+    assert second_reservation.artifact_version == first_reservation.artifact_version + 1
+    assert ProjectRepository(database).get(project.id).status is ProjectStatus.GENERATING
+    with database.connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT COUNT(*) FROM projects AS p
+            WHERE p.id = %s AND p.status = 'generating'
+              AND NOT EXISTS (
+                SELECT 1 FROM jobs AS j
+                WHERE j.project_id = p.id AND j.status IN ('queued', 'running')
+              )""",
+            (project.id,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT COUNT(*) FROM jobs WHERE project_id = %s", (project.id,))
+        assert cursor.fetchone() == (2,)
+
+    worker(database, tmp_path, clock, worker_id="recovery-worker").poll_once()
+    recovered = ProjectRepository(database).get(project.id)
+    assert recovered.status is ProjectStatus.REVIEW_REQUIRED
+    assert recovered.current_artifacts[ArtifactKind.FACT_CARD].version == 2
+    assert ArtifactRepository(database).get(first_ref.artifact_id, 1) == first_artifact
+
+
 def test_retryable_failure_reuses_job_and_reservation_then_succeeds(
     database: Database,
     api: tuple[TestClient, dict[str, datetime]],
