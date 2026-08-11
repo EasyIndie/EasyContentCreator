@@ -30,14 +30,26 @@ class BrowserPage:
         self._connection = connection
         self._message_id = 0
 
-    def command(self, method: str, parameters: dict[str, object] | None = None) -> dict[str, Any]:
+    def command(
+        self,
+        method: str,
+        parameters: dict[str, object] | None = None,
+        timeout: float = 10,
+    ) -> dict[str, Any]:
         self._message_id += 1
         message_id = self._message_id
+        deadline = time.monotonic() + timeout
         self._connection.send(
             json.dumps({"id": message_id, "method": method, "params": parameters or {}})
         )
         while True:
-            response = json.loads(self._connection.recv())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"browser command timed out: {method}")
+            try:
+                response = json.loads(self._connection.recv(timeout=remaining))
+            except TimeoutError as error:
+                raise AssertionError(f"browser command timed out: {method}") from error
             if response.get("id") == message_id:
                 if "error" in response:
                     raise AssertionError(f"browser command failed: {response['error']}")
@@ -89,6 +101,10 @@ def _free_local_port() -> int:
 def _browser_page(url: str) -> Iterator[BrowserPage]:
     debugging_port = _free_local_port()
     with tempfile.TemporaryDirectory(prefix="ecc034-chrome-") as profile:
+        sandbox_setting = os.environ.get("ECC_BROWSER_NO_SANDBOX", "0")
+        if sandbox_setting not in {"0", "1"}:
+            raise AssertionError("ECC_BROWSER_NO_SANDBOX must be 0 or 1")
+        sandbox_arguments = ["--no-sandbox"] if sandbox_setting == "1" else []
         process = subprocess.Popen(
             [
                 _chrome_executable(),
@@ -97,7 +113,7 @@ def _browser_page(url: str) -> Iterator[BrowserPage]:
                 "--disable-default-apps",
                 "--disable-sync",
                 "--no-first-run",
-                "--no-sandbox",
+                *sandbox_arguments,
                 f"--remote-debugging-port={debugging_port}",
                 f"--user-data-dir={profile}",
                 url,
@@ -136,7 +152,7 @@ def _browser_page(url: str) -> Iterator[BrowserPage]:
 
 
 def _set_control(page: BrowserPage, selector: str, value: str) -> None:
-    page.evaluate(
+    updated = page.evaluate(
         "(() => {"
         f"const element = document.querySelector({json.dumps(selector)});"
         """
@@ -151,6 +167,7 @@ def _set_control(page: BrowserPage, selector: str, value: str) -> None:
           return true;
         })()"""
     )
+    assert updated is True, f"browser control not found or not updated: {selector}"
 
 
 def _click_text(page: BrowserPage, selector: str, text: str) -> None:

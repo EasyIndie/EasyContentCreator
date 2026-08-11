@@ -28,7 +28,7 @@
    - Python 快速集：129 passed；Compose gate：3 passed；Web：22 passed；生产构建通过。
    - 唯一 warning：第三方 Starlette/httpx 弃用提示，不影响当前行为。
 2. `.venv/bin/python -m pytest -q tests/e2e/test_m1_exit_smoke.py`
-   - system Chrome/CDP 与字节 SHA 加固后独立运行：1 passed，31.35 秒。
+   - system Chrome/CDP、字节 SHA、收包超时与默认 sandbox 加固后：1 passed，29.47 秒。
    - 使用唯一 Compose project、fresh PostgreSQL/Artifact volumes、任务专属镜像并执行 `down -v --rmi local`。
    - Chrome performance entries 证明页面请求使用 `http://localhost:<port>/api/...`；未使用 mocked fetch。
    - 同一非零 Web 发布端口以 `localhost` 与 `127.0.0.1` 访问均返回 200。
@@ -50,6 +50,7 @@ harness 失败，不再对 Host 边界作无依据推断。
   仅声明 M1 本地通用流水线准出，不将其误报为生产部署就绪。
 - Starlette/httpx 弃用 warning 应在依赖升级任务中处理，但不阻塞 M1。
 - Compose 浏览器门禁依赖 system Chrome/Chromium；本地与 CI 缺少浏览器时会失败关闭，不自动下载。
+  sandbox 默认启用；仅显式 `ECC_BROWSER_NO_SANDBOX=1` 才为受限环境关闭。
 
 ## M2 剩余 Backlog
 

@@ -78,7 +78,8 @@ POSTGRES_PASSWORD=validation-only ./scripts/verify.sh
 M1 浏览器准出测试还要求系统已安装 Chrome/Chromium，可通过 `CHROME_BIN` 指定可执行文件。测试
 使用系统浏览器的 DevTools Protocol，不下载浏览器；找不到浏览器时失败关闭。macOS 默认查找
 Google Chrome 应用，Linux/CI 默认查找 `google-chrome`、`google-chrome-stable`、`chromium` 或
-`chromium-browser`。
+`chromium-browser`。Chrome sandbox 默认启用；只有运行环境明确不支持 sandbox 时才设置
+`ECC_BROWSER_NO_SANDBOX=1`，该开关仅用于浏览器测试进程，不得作为普通本地或 CI 默认值。
 
 本机 Docker 支持 Buildx/QEMU 时，可验证 ARM64 与 AMD64 镜像及容器启动：
 
