@@ -28,6 +28,12 @@ from packages.pipeline import (
     TextStepProducer,
     validate_citation_closure,
 )
+from packages.providers.text import (
+    DeterministicFakeTextProvider,
+    TextGenerationRequest,
+    TextGenerationResult,
+    TextProvider,
+)
 
 NOW = datetime(2026, 8, 11, tzinfo=UTC)
 PROJECT_ID = UUID("10000000-0000-0000-0000-000000000039")
@@ -108,8 +114,74 @@ def request_for(
     return StepProductionRequest(uuid4(), spec, (StepOutputReservation(output, output_id, 1),))
 
 
-def producer(artifact: Artifact, root: Path) -> TextStepProducer:
-    return TextStepProducer(artifacts=Resolver((artifact,)), storage_root=root, clock=lambda: NOW)
+def producer(
+    artifact: Artifact, root: Path, provider: TextProvider | None = None
+) -> TextStepProducer:
+    return TextStepProducer(
+        artifacts=Resolver((artifact,)),
+        storage_root=root,
+        clock=lambda: NOW,
+        provider=provider,
+    )
+
+
+class ChangedProvider:
+    name = "changed"
+    version = "changed_v1"
+
+    def __init__(self, change: str) -> None:
+        self.change = change
+
+    def generate(self, request: TextGenerationRequest) -> TextGenerationResult:
+        generated = DeterministicFakeTextProvider().generate(request)
+        if self.change == "invalid_json":
+            return replace(generated, content=b"not-json", provider_version=self.version)
+        if self.change == "noncanonical":
+            return replace(
+                generated, content=generated.content + b"\n", provider_version=self.version
+            )
+        if self.change == "duplicate_field":
+            return replace(
+                generated,
+                content=b'{"type":"topic_brief",' + generated.content[1:],
+                provider_version=self.version,
+            )
+        if self.change == "nonfinite":
+            return replace(
+                generated,
+                content=generated.content[:-1] + b',"extra":NaN}',
+                provider_version=self.version,
+            )
+        if self.change == "provider_version":
+            return replace(generated, provider_version="wrong")
+        if self.change == "result_schema":
+            return replace(generated, schema_version="wrong", provider_version=self.version)
+
+        document = json.loads(generated.content)
+        if self.change == "missing":
+            del document["type"]
+        elif self.change == "extra":
+            document["extra"] = "field"
+        elif self.change == "type":
+            document["type"] = "script"
+        elif self.change == "document_schema":
+            document["schema_version"] = "wrong"
+        elif self.change == "input_sha":
+            document["input_sha256"] = "f" * 64
+        elif self.change == "citations":
+            document["citation_keys"] = document["citation_keys"][:-1]
+        elif self.change == "citation_shape":
+            document["citation_keys"][0]["extra"] = "field"
+        elif self.change == "field_type":
+            document["title"] = 123
+        content = json.dumps(
+            document,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return replace(generated, content=content, provider_version=self.version)
 
 
 def test_topic_and_script_preserve_complete_citation_closure_and_versions(tmp_path: Path) -> None:
@@ -177,3 +249,82 @@ def test_resolved_artifact_must_match_pinned_ref_and_no_body_is_logged(
         producer(changed, tmp_path)(request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID))
     assert "AI 科技选题" not in caplog.text
     assert "问题是什么" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "invalid_json",
+        "noncanonical",
+        "duplicate_field",
+        "nonfinite",
+        "provider_version",
+        "result_schema",
+        "missing",
+        "extra",
+        "type",
+        "document_schema",
+        "input_sha",
+        "citations",
+        "citation_shape",
+        "field_type",
+    ],
+)
+def test_provider_output_must_match_the_complete_frozen_contract(
+    tmp_path: Path, change: str
+) -> None:
+    fact = input_artifact()
+    with pytest.raises(TextEvidenceError):
+        producer(fact, tmp_path, ChangedProvider(change))(
+            request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID)
+        )
+    assert not tuple(tmp_path.rglob("*.json"))
+
+
+def test_parameters_must_match_the_frozen_request(tmp_path: Path) -> None:
+    fact = input_artifact()
+    request = request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID)
+    for parameters in (
+        {"budget_units": 4096},
+        {**request.spec.parameters, "extra": True},
+        {**request.spec.parameters, "template_version": "topic_brief_v2"},
+    ):
+        changed = replace(request, spec=replace(request.spec, parameters=parameters))
+        with pytest.raises(ValueError):
+            producer(fact, tmp_path)(changed)
+    assert not tuple(tmp_path.rglob("*.json"))
+
+
+def test_atomic_publish_reuses_same_bytes_and_rejects_conflicts_and_residue(
+    tmp_path: Path,
+) -> None:
+    fact = input_artifact()
+    request = request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID)
+    artifact = producer(fact, tmp_path)(request).artifacts[0].artifact
+    target = tmp_path / artifact.storage_path
+    assert target.read_bytes()
+    assert not target.with_name(f".{target.name}.tmp").exists()
+    assert producer(fact, tmp_path)(request).artifacts[0].artifact == artifact
+
+    target.write_bytes(b"different")
+    with pytest.raises(TextEvidenceError, match="different bytes"):
+        producer(fact, tmp_path)(request)
+
+    target.unlink()
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_bytes(b"interrupted")
+    with pytest.raises(TextEvidenceError, match="interrupted temporary"):
+        producer(fact, tmp_path)(request)
+    assert temporary.read_bytes() == b"interrupted"
+
+
+def test_publish_rejects_symbolic_link_storage_components(tmp_path: Path) -> None:
+    fact = input_artifact()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "text").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(TextEvidenceError, match="directory is unsafe"):
+        producer(fact, root)(request_for(StepKind.TOPIC_BRIEF, fact, TOPIC_ID))
+    assert tuple(outside.iterdir()) == ()
