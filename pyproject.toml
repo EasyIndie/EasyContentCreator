@@ -28,6 +28,7 @@ include = ["apps*", "packages*", "migrations*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["compose: tests that build and run isolated Docker Compose projects"]
 
 [tool.ruff]
 line-length = 100

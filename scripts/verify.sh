@@ -8,11 +8,14 @@ cd "$root"
 if [[ -f pyproject.toml ]]; then
   source "$root/scripts/python-toolchain.sh"
   resolve_python_toolchain "$root"
+  export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+  verify_repository_imports "$root"
   ./scripts/test-verify-fail-closed.sh
-  "$ECC_VERIFY_RUFF" format --check .
-  "$ECC_VERIFY_RUFF" check .
-  "$ECC_VERIFY_MYPY" apps packages migrations
-  "$ECC_VERIFY_PYTEST"
+  "$ECC_VERIFY_PYTHON" -m ruff format --check .
+  "$ECC_VERIFY_PYTHON" -m ruff check .
+  "$ECC_VERIFY_PYTHON" -m mypy apps packages migrations
+  "$ECC_VERIFY_PYTHON" -m pytest -m "not compose"
+  "$ECC_VERIFY_PYTHON" -m pytest -m compose tests/e2e
 fi
 
 if [[ -f apps/web/package.json ]]; then

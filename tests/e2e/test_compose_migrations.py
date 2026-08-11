@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 COMPOSE_FILE = REPOSITORY_ROOT / "compose.yaml"
@@ -13,17 +15,11 @@ MIGRATIONS_DIRECTORY = REPOSITORY_ROOT / "migrations"
 PASSWORD = "ecc033-validation-only"
 
 
-def _free_port() -> str:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return str(listener.getsockname()[1])
-
-
 def _environment(image_suffix: str) -> dict[str, str]:
     return {
         **os.environ,
-        "API_PORT": _free_port(),
-        "WEB_PORT": _free_port(),
+        "API_PORT": "0",
+        "WEB_PORT": "0",
         "ECC_IMAGE": f"ecc033-app-{image_suffix}:dev",
         "ECC_WEB_IMAGE": f"ecc033-web-{image_suffix}:dev",
         "POSTGRES_PASSWORD": PASSWORD,
@@ -84,10 +80,24 @@ def _cleanup(project: str, environment: dict[str, str], *, remove_images: bool) 
     _compose(project, environment, *arguments)
 
 
+def _cleanup_projects(
+    projects: tuple[tuple[str, bool], ...], environment: dict[str, str]
+) -> tuple[str, ...]:
+    errors = []
+    for project, remove_images in projects:
+        try:
+            _cleanup(project, environment, remove_images=remove_images)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            errors.append(f"{project}: {error}")
+    return tuple(errors)
+
+
+@pytest.mark.compose
 def test_compose_migrations_are_idempotent_and_fail_closed() -> None:
     suffix = uuid4().hex[:10]
     success_project = f"ecc033-success-{suffix}"
     failure_project = f"ecc033-failure-{suffix}"
+    unavailable_project = f"ecc033-unavailable-{suffix}"
     environment = _environment(suffix)
 
     with tempfile.TemporaryDirectory(prefix="ecc033-") as temporary_directory:
@@ -169,6 +179,28 @@ def test_compose_migrations_are_idempotent_and_fail_closed() -> None:
             assert failed.returncode != 0
             assert PASSWORD not in failed.stdout
             assert PASSWORD not in failed.stderr
+            migrate_id = _compose(
+                failure_project,
+                environment,
+                "ps",
+                "--all",
+                "--quiet",
+                "migrate",
+                override=override,
+            ).stdout.strip()
+            assert migrate_id
+            inspected = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.ExitCode}}", migrate_id],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert int(inspected.stdout.strip()) != 0
+            migrate_logs = _compose(
+                failure_project, environment, "logs", "--no-color", "migrate", override=override
+            )
+            assert PASSWORD not in migrate_logs.stdout
+            assert PASSWORD not in migrate_logs.stderr
             failure_running = set(
                 _compose(
                     failure_project,
@@ -182,6 +214,34 @@ def test_compose_migrations_are_idempotent_and_fail_closed() -> None:
             )
             assert "api" not in failure_running
             assert "worker" not in failure_running
+
+            unavailable = _compose(
+                unavailable_project,
+                environment,
+                "run",
+                "--rm",
+                "--no-deps",
+                "--environment",
+                "ECC_DATABASE_URL=postgresql://ecc:ecc033-unavailable-secret@127.0.0.1:1/ecc",
+                "migrate",
+                check=False,
+            )
+            assert unavailable.returncode != 0
+            assert "ecc033-unavailable-secret" not in unavailable.stdout
+            assert "ecc033-unavailable-secret" not in unavailable.stderr
+            unavailable_running = _compose(
+                unavailable_project, environment, "ps", "--status", "running", "--services"
+            ).stdout.splitlines()
+            assert "api" not in unavailable_running
+            assert "worker" not in unavailable_running
         finally:
-            _cleanup(failure_project, environment, remove_images=False)
-            _cleanup(success_project, environment, remove_images=True)
+            cleanup_errors = _cleanup_projects(
+                (
+                    (failure_project, False),
+                    (unavailable_project, False),
+                    (success_project, True),
+                ),
+                environment,
+            )
+            if cleanup_errors and sys.exc_info()[0] is None:
+                raise AssertionError("; ".join(cleanup_errors))

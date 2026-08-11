@@ -3,7 +3,10 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 
+
+@pytest.mark.compose
 def test_compose_injects_prefixed_database_and_persistent_artifact_root() -> None:
     repository_root = Path(__file__).parents[2]
     environment = {
