@@ -28,6 +28,33 @@ export type Project = {
 export type Health = { status: string; environment: string; database: string }
 export type Version = { version: string; commit: string }
 export type ReviewDecision = 'approve' | 'reject'
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+
+export type Job = {
+  id: string
+  project_id: string
+  kind: string
+  status: JobStatus
+  attempt: number
+  max_attempts: number
+  available_at: string
+  created_at: string
+  updated_at: string
+  error_class: string | null
+  recoverable: boolean
+}
+
+export type GenerationRequest = {
+  source_ids: string[]
+  template_version: string
+  budget_units: number
+}
+
+export type GenerationResponse = {
+  job_id: string
+  project_id: string
+  status: JobStatus
+}
 
 type ApiErrorBody = { detail: { code: string; message: string } }
 
@@ -51,6 +78,7 @@ const projectStatuses = new Set<ProjectStatus>([
   'published',
   'failed',
 ])
+const jobStatuses = new Set<JobStatus>(['queued', 'running', 'succeeded', 'failed'])
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -86,6 +114,24 @@ function project(value: unknown): value is Project {
     return false
   }
   return Object.values(value.current_artifacts).every(artifactRef)
+}
+
+function job(value: unknown): value is Job {
+  return (
+    object(value) &&
+    string(value.id) &&
+    string(value.project_id) &&
+    string(value.kind) &&
+    string(value.status) &&
+    jobStatuses.has(value.status as JobStatus) &&
+    Number.isInteger(value.attempt) &&
+    Number.isInteger(value.max_attempts) &&
+    string(value.available_at) &&
+    string(value.created_at) &&
+    string(value.updated_at) &&
+    (value.error_class === null || string(value.error_class)) &&
+    typeof value.recoverable === 'boolean'
+  )
 }
 
 function errorBody(value: unknown): value is ApiErrorBody {
@@ -156,6 +202,35 @@ export function createProject(title: string): Promise<Project> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
+  })
+}
+
+export function listProjectJobs(projectId: string, signal?: AbortSignal): Promise<Job[]> {
+  return request(`/projects/${projectId}/jobs`, (value): value is { items: Job[] } => {
+    return object(value) && Array.isArray(value.items) && value.items.every(job)
+  }, { signal }).then((value) => value.items)
+}
+
+export function generateProject(
+  projectId: string,
+  idempotencyKey: string,
+  generation: GenerationRequest,
+): Promise<GenerationResponse> {
+  return request(`/projects/${projectId}/generate`, (value): value is GenerationResponse => {
+    return (
+      object(value) &&
+      string(value.job_id) &&
+      string(value.project_id) &&
+      string(value.status) &&
+      jobStatuses.has(value.status as JobStatus)
+    )
+  }, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify(generation),
   })
 }
 

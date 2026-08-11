@@ -25,6 +25,10 @@ textarea { min-height: 6rem; }
 button { width: fit-content; padding: 0.6rem 1rem; cursor: pointer; }
 button:disabled { cursor: wait; opacity: 0.65; }
 .project-list { display: grid; gap: 0.5rem; padding-left: 1.25rem; }
+.nested-section { margin: 1.5rem 0; padding: 1rem; background: #f3f7f2; }
+.job-list { display: grid; gap: 1rem; padding-left: 1.5rem; }
+.job-list li { overflow-wrap: anywhere; }
+.job-list form { margin-top: 1rem; }
 dt { font-weight: 700; }
 dd { margin: 0 0 0.5rem; }
 fieldset { display: flex; gap: 1rem; }
