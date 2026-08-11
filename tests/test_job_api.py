@@ -10,7 +10,7 @@ from apps.common.database import Database
 from packages.domain import ContentProject, ProjectRepository, ProjectStatus
 from packages.pipeline import FactCardGenerationSpec, GenerationRequestRepository, JobStore
 
-NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
+NOW = datetime.now(UTC) + timedelta(minutes=1)
 
 
 @pytest.fixture

@@ -416,13 +416,25 @@ class ArtifactRepository:
                 ) from error
 
     def get(self, artifact_id: UUID, version: int) -> Artifact:
+        return self.get_for_project(artifact_id, version, project_id=None)
+
+    def get_for_project(
+        self,
+        artifact_id: UUID,
+        version: int,
+        project_id: UUID | None,
+    ) -> Artifact:
         with (
             self._database.connect() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             cursor.execute(
-                "SELECT * FROM artifacts WHERE id = %s AND version = %s",
-                (artifact_id, version),
+                """
+                SELECT * FROM artifacts
+                WHERE id = %s AND version = %s
+                  AND (%s::uuid IS NULL OR project_id = %s)
+                """,
+                (artifact_id, version, project_id, project_id),
             )
             row = cursor.fetchone()
             if row is None:
@@ -435,7 +447,7 @@ class ArtifactRepository:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             cursor.execute(
-                "SELECT * FROM artifacts WHERE project_id = %s ORDER BY created_at, id, version",
+                "SELECT * FROM artifacts WHERE project_id = %s ORDER BY kind, id, version",
                 (project_id,),
             )
             return tuple(self._hydrate(cursor, row) for row in cursor.fetchall())
