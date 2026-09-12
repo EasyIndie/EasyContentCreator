@@ -1,0 +1,42 @@
+/* EasyIndie 站点样式（自包含，无外部依赖） */
+:root {
+  --bg: #fafaf8;
+  --fg: #1c1c1e;
+  --muted: #6b6b70;
+  --line: #e6e6e2;
+  --accent: #d94f2b;
+  --card: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#141416; --fg:#eceae6; --muted:#9a9a9f; --line:#2c2c30; --card:#1c1c1f; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+main { max-width: 780px; margin: 0 auto; padding: 56px 24px 80px; }
+header.site { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 32px; }
+.logo { font-size: 22px; font-weight: 700; letter-spacing: .2px; }
+.logo a { color: inherit; text-decoration: none; }
+.tagline { color: var(--muted); font-size: 14px; margin-top: 6px; }
+h1 { font-size: 26px; margin: 32px 0 12px; letter-spacing: .2px; }
+h2 { font-size: 18px; margin: 32px 0 8px; }
+h3 { font-size: 16px; margin: 22px 0 6px; color: var(--muted); }
+p, li { color: var(--fg); }
+a { color: var(--accent); }
+ul { padding-left: 20px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 18px 20px; margin: 14px 0;
+}
+.card h3 { margin-top: 0; color: var(--fg); }
+.links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.links a {
+  display: inline-block; padding: 8px 14px; border: 1px solid var(--line);
+  border-radius: 8px; text-decoration: none; font-size: 14px; background: var(--card);
+}
+.meta { color: var(--muted); font-size: 13px; }
+footer.site { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+code { background: rgba(128,128,128,.14); padding: 1px 6px; border-radius: 5px; font-size: 14px; }
