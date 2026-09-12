@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EasyIndie · 内容创作</title>
-<meta name="description" content="EasyIndie — 面向 AI 与科技知识的自动化内容创作流水线。">
+<title>EasyIndie Uploader · EasyIndie 内容创作</title>
+<meta name="description" content="EasyIndie Uploader 是 EasyIndie 的自用视频发布工具，通过 YouTube API Services 将本人制作的视频上传并管理于自有 YouTube 频道。">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -14,30 +14,54 @@
     <div class="tagline">面向 AI 与科技知识的自动化内容创作流水线</div>
   </header>
 
-  <h1>关于</h1>
-  <p>EasyIndie 是一个小型内容创作工作室，专注于把 AI 与科技知识整理成便于传播的视频与图文内容，
-     并通过自动化流水线完成素材处理、格式转换与发布。本站用于承载与这些内容及其配套工具相关的公开页面。</p>
+  <h1>EasyIndie Uploader</h1>
+  <p><strong>EasyIndie Uploader</strong> 是 EasyIndie（本文称「本站」）开发并使用的视频发布工具，
+     用于把已制作完成的视频上传、更新到我们自己的 YouTube 频道。本页面为该应用的官方首页，
+     说明它的功能、为什么需要访问您的 Google 账号数据，以及我们如何处理这些数据。</p>
 
-  <h2>应用与工具</h2>
+  <h2>应用名称</h2>
   <div class="card">
-    <h3>EasyIndie Uploader</h3>
-    <p class="meta">自用桌面工具 · 通过 YouTube API Services 管理自有频道的视频上传</p>
-    <p>该工具仅由本站所属频道的运营者本人授权使用，用于将已完成的视频上传至自有 YouTube 频道，
-       不面向公众提供账号或上传服务。</p>
+    <p style="margin:0">本应用在 Google 授权页面显示的名称：<strong>EasyIndie Uploader</strong>
+       （所属品牌/网站：<strong>EasyIndie</strong>）</p>
   </div>
+
+  <h2>这个应用做什么</h2>
+  <ul>
+    <li>将创作者本人制作的视频文件上传至<strong>本人拥有的 YouTube 频道</strong>；</li>
+    <li>设置与更新视频的标题、描述、标签、缩略图与隐私状态；</li>
+    <li>查询上传与处理进度，失败时重试；</li>
+    <li>供 EasyIndie 内部自动化流水线调用，用于批量整理、转换与排期发布内容。</li>
+  </ul>
+
+  <h2>为什么需要访问您的 Google 账号数据</h2>
+  <p>上传与管理 YouTube 视频必须获得频道所有者的授权，因此本应用请求以下权限
+     （Google 作用域 <code>youtube.force-ssl</code>）：</p>
+  <ul>
+    <li><strong>管理您的 YouTube 视频</strong> —— 用于上传视频、修改视频元数据、设置隐私状态。</li>
+  </ul>
+  <p>该权限<strong>仅</strong>用于上述上传与管理目的。我们不读取您的 Google 密码、Gmail、通讯录、
+     相册或任何与视频发布无关的数据，也不会将数据用于广告、画像、出售或与第三方共享。
+     授权令牌仅保存在我们自己的设备本地。</p>
+
+  <h2>谁在使用</h2>
+  <p>本应用目前仅供 EasyIndie 的运营者本人使用（自用工具），不向公众提供注册、代管或第三方上传服务。</p>
 
   <h2>政策与条款</h2>
   <div class="links">
     <a href="privacy.html">隐私政策 / Privacy Policy</a>
     <a href="terms.html">服务条款 / Terms of Service</a>
   </div>
+  <p class="meta">使用本应用即表示您同意受
+     <a href="https://www.youtube.com/t/terms" rel="noopener">YouTube 服务条款</a>约束；
+     Google 对数据的处理适用
+     <a href="https://policies.google.com/privacy" rel="noopener">Google 隐私权政策</a>。</p>
 
   <h2>联系方式</h2>
   <p>如需数据删除或其它咨询，请通过本项目公开 issue 提交：
      <a href="https://github.com/EasyIndie/EasyContentCreator/issues" rel="noopener">github.com/EasyIndie/EasyContentCreator/issues</a></p>
 
   <footer class="site">
-    © 2026 EasyIndie · 本页面的内容由 EasyIndie 维护
+    © 2026 EasyIndie · 本页面由 EasyIndie 维护
   </footer>
 </main>
 </body>
